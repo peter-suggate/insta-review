@@ -1,0 +1,15 @@
+[package]
+name = "ir-pipeline-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ir-types.workspace = true
+ir-core.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+openh264 = { version = "0.9", features = ["source"] }
+
+[dev-dependencies]
+ir-mux.workspace = true

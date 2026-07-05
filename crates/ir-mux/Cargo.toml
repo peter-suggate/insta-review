@@ -1,0 +1,12 @@
+[package]
+name = "ir-mux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ir-types.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
