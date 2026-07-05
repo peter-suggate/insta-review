@@ -12,6 +12,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tiny_http = "0.12"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [[bin]]
 name = "gsi-sim"
 path = "src/bin/gsi_sim.rs"

@@ -9,6 +9,7 @@ members = [
     "crates/ir-gsi",
     "crates/ir-winutil",
     "crates/ir-cli",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]

@@ -1,0 +1,88 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #101014;
+  --panel: #17171d;
+  --text: #e8e8ec;
+  --dim: #8a8a94;
+  --accent: #50c878;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+body { display: flex; flex-direction: column; }
+
+#stage { position: relative; flex: 1; min-height: 0; background: #000; }
+#video { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+#waiting {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--dim);
+}
+#waiting .big { font-size: 22px; letter-spacing: 1px; color: var(--text); }
+
+#hud {
+  position: absolute; top: 10px; left: 12px;
+  display: flex; gap: 14px;
+  background: rgba(10, 10, 14, 0.72);
+  padding: 6px 10px; border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+#hud-rate { color: var(--accent); }
+#hud-flags { color: var(--dim); }
+
+#toast {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  background: rgba(10, 10, 14, 0.85);
+  padding: 8px 14px; border-radius: 6px;
+  transition: opacity 0.3s;
+}
+
+#bottom { background: var(--panel); border-top: 1px solid #26262e; }
+#timeline { display: block; width: 100%; height: 64px; cursor: pointer; }
+#statusbar {
+  display: flex; justify-content: space-between;
+  padding: 5px 10px; color: var(--dim); font-size: 11.5px;
+}
+
+.hidden { display: none !important; }
+
+#settings {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 10;
+}
+#settings-panel {
+  width: 520px; max-height: 84vh; overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid #2c2c36; border-radius: 10px;
+  padding: 18px;
+}
+#settings-panel h2 { font-size: 15px; margin-bottom: 12px; }
+#settings-fields .row, .row.buttons {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 0; gap: 8px;
+}
+#settings-fields label { color: var(--dim); }
+#settings-fields input[type="text"], #settings-fields input[type="number"] {
+  width: 180px; background: #0e0e12; color: var(--text);
+  border: 1px solid #2c2c36; border-radius: 4px; padding: 4px 8px;
+}
+#settings-fields input[type="checkbox"] { accent-color: var(--accent); }
+#settings-stats { color: var(--dim); font-size: 11.5px; padding: 8px 0; }
+button {
+  background: #22222b; color: var(--text);
+  border: 1px solid #33333e; border-radius: 5px;
+  padding: 6px 12px; cursor: pointer;
+}
+button:hover { background: #2a2a34; }
+button.danger { color: #ff7a7a; }

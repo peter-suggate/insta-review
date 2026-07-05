@@ -2,6 +2,10 @@
 //! management. Compiles to an empty shell elsewhere.
 
 #[cfg(windows)]
+mod focus;
+#[cfg(windows)]
 mod hotkey;
+#[cfg(windows)]
+pub use focus::{foreground_window, restore_foreground};
 #[cfg(windows)]
 pub use hotkey::{Hotkey, HotkeyListener};

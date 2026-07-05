@@ -19,7 +19,37 @@ Integration (a config file; the game POSTs JSON to a local port).
 - **M2 in test** — Windows pipeline (WGC → D3D11 VideoProcessor → H.264 MFT),
   global hotkey, GSI markers. Compiles clean for `x86_64-pc-windows-msvc`;
   needs first run on a real Windows box (below).
-- Next: Tauri review window with a WebCodecs frame-stepping player (M3).
+- **M3+M4 done** — the desktop app (`apps/desktop`): warm hidden review
+  window, hotkey → frame-accurate WebCodecs player in <100 ms, timeline
+  with GSI kill/death/round/bomb markers, 4:3-stretch aspect override +
+  crosshair zoom, settings drawer, one-click GSI config installer.
+  Verified end-to-end on macOS with the test pipeline (automated self-test
+  reads the burned-in frame counters back from decoded pixels: stepping
+  advances exactly 1 frame, backstep exact, ~25 ms/step).
+- Post-v1: audio track (WASAPI loopback — needs the Windows box), pipeline
+  auto-restart on display-mode change, packaging/installer polish.
+
+## The desktop app
+
+```
+cargo run -p insta-review --release
+```
+
+Starts capturing immediately (Windows: the primary display via WGC;
+elsewhere: the synthetic test pattern). Press **Ctrl+Alt+R** (configurable)
+at any moment: the review window opens paused ~1.5 s before your keypress.
+
+Player keys: `Space` play/pause · `,` `.` frame step · `J K L` ·
+`←/→` ±1 s · `1–5` speed 0.1×–2× · `M` next marker · `Z` crosshair zoom ·
+`A` 4:3↔16:9 stretch · `S` save clip (MP4 + marker sidecar → Videos/insta-review) ·
+`G` settings · `Esc` back to game (focus restored on Windows).
+
+For CS2 markers: `G` → "Install CS2 GSI config…" (writes one cfg file into
+the CS2 cfg dir after confirmation), restart CS2 once.
+
+Dev hooks: `IR_AUTOTRIGGER=8` fires the hotkey path 8 s after launch;
+`IR_AUTOTEST=1` runs the frame-accuracy self-test against a test-pattern
+clip and logs `SELFTEST …` via the `player` log target.
 
 ## Testing on the Windows gaming box
 

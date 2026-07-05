@@ -1,0 +1,118 @@
+// Timeline strip: playhead, keyframe ticks, trigger line, GSI markers
+// (drawn as soft bands + icons because GSI timing is approximate).
+
+const MARKER_STYLE = {
+  kill: { color: "#50c878", label: "K" },
+  death: { color: "#ff5a5a", label: "D" },
+  damage_taken: { color: "#ffb050", label: "·" },
+  round_phase: { color: "#5090ff", label: "R" },
+  bomb: { color: "#ffe050", label: "B" },
+  shot_fired: { color: "#9a9aa4", label: "s" },
+};
+
+export class Timeline {
+  constructor(canvas, { onSeek } = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.onSeek = onSeek || (() => {});
+    this.durationUs = 0;
+    this.playheadUs = 0;
+    this.markers = [];
+    this.keyframesUs = [];
+    this.triggerUs = 0;
+    this.gsiOffsetUs = 0;
+
+    const seekFromEvent = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      this.onSeek(frac * this.durationUs);
+    };
+    let dragging = false;
+    canvas.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      canvas.setPointerCapture(e.pointerId);
+      seekFromEvent(e);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (dragging) seekFromEvent(e);
+    });
+    canvas.addEventListener("pointerup", () => (dragging = false));
+  }
+
+  load({ durationUs, markers, keyframesUs, triggerUs, gsiOffsetUs }) {
+    this.durationUs = durationUs;
+    this.markers = markers;
+    this.keyframesUs = keyframesUs;
+    this.triggerUs = triggerUs;
+    this.gsiOffsetUs = gsiOffsetUs;
+    this.draw();
+  }
+
+  setPlayhead(us) {
+    this.playheadUs = us;
+    this.draw();
+  }
+
+  nextMarkerAfter(us) {
+    const sorted = [...this.markers].sort((a, b) => a.at - b.at);
+    for (const marker of sorted) {
+      const t = marker.at * 1e6 + this.gsiOffsetUs;
+      if (t > us + 1000) return t;
+    }
+    return sorted.length ? sorted[0].at * 1e6 + this.gsiOffsetUs : null;
+  }
+
+  draw() {
+    const canvas = this.canvas;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth,
+      cssH = canvas.clientHeight;
+    if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+      canvas.width = cssW * dpr;
+      canvas.height = cssH * dpr;
+    }
+    const ctx = this.ctx;
+    const w = canvas.width,
+      h = canvas.height;
+    const x = (us) => (this.durationUs ? (us / this.durationUs) * w : 0);
+
+    ctx.fillStyle = "#131318";
+    ctx.fillRect(0, 0, w, h);
+
+    // Keyframe ticks along the bottom.
+    ctx.fillStyle = "#2c2c36";
+    for (const kUs of this.keyframesUs) {
+      ctx.fillRect(x(kUs), h - 8 * dpr, Math.max(1, dpr), 8 * dpr);
+    }
+
+    // Markers: soft band + icon (GSI timing is approximate).
+    for (const marker of this.markers) {
+      const t = marker.at * 1e6 + this.gsiOffsetUs;
+      if (t < 0 || t > this.durationUs) continue;
+      const style = MARKER_STYLE[marker.kind.type] || {
+        color: "#888",
+        label: "?",
+      };
+      const bandHalf = x(300_000) - x(0); // ±300 ms
+      ctx.fillStyle = style.color + "22";
+      ctx.fillRect(x(t) - bandHalf, 0, bandHalf * 2, h);
+      ctx.fillStyle = style.color;
+      ctx.fillRect(x(t) - dpr, 0, 2 * dpr, h);
+      ctx.font = `${11 * dpr}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.fillText(style.label, x(t), 13 * dpr);
+    }
+
+    // Trigger line.
+    ctx.fillStyle = "#e8e8ec";
+    ctx.fillRect(x(this.triggerUs) - dpr, 0, 2 * dpr, h);
+    ctx.font = `${10 * dpr}px system-ui`;
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#8a8a94";
+    ctx.fillText("hotkey", x(this.triggerUs) + 4 * dpr, h - 4 * dpr);
+
+    // Playhead.
+    ctx.fillStyle = "#50c878";
+    ctx.fillRect(x(this.playheadUs) - dpr, 0, 2 * dpr, h);
+  }
+}

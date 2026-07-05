@@ -1,0 +1,35 @@
+[package]
+name = "insta-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "insta-review"
+path = "src/main.rs"
+
+[features]
+# Synthetic capture for development off-Windows (openh264 C build).
+default = ["test-pipeline"]
+test-pipeline = ["dep:ir-pipeline-test"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ir-types.workspace = true
+ir-core.workspace = true
+ir-mux.workspace = true
+ir-gsi.workspace = true
+ir-pipeline-test = { workspace = true, optional = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ir-pipeline-win.workspace = true
+ir-winutil.workspace = true

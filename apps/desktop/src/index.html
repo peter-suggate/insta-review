@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>insta-review</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="video"></canvas>
+    <div id="waiting">
+      <div class="big">insta-review</div>
+      <div id="waiting-msg">capturing — press the hotkey in game to review the last moments</div>
+    </div>
+    <div id="hud" class="hidden">
+      <span id="hud-time">0.00 / 0.00</span>
+      <span id="hud-frame">f 0</span>
+      <span id="hud-rate">1×</span>
+      <span id="hud-flags"></span>
+    </div>
+    <div id="toast" class="hidden"></div>
+  </div>
+
+  <div id="bottom">
+    <canvas id="timeline"></canvas>
+    <div id="statusbar">
+      <span id="hints">
+        Space play/pause · , . frame step · J K L · ← → ±1s · 1–5 speed ·
+        M next marker · Z zoom · A aspect · S save · G settings · Esc close
+      </span>
+    </div>
+  </div>
+
+  <div id="settings" class="hidden">
+    <div id="settings-panel">
+      <h2>Settings</h2>
+      <div id="settings-fields"></div>
+      <div id="settings-stats"></div>
+      <div class="row buttons">
+        <button id="btn-install-gsi">Install CS2 GSI config…</button>
+        <button id="btn-apply">Apply &amp; restart capture</button>
+        <button id="btn-close-settings">Close</button>
+        <button id="btn-quit" class="danger">Quit insta-review</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js" type="module"></script>
+</body>
+</html>

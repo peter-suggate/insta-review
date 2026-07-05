@@ -4,6 +4,7 @@
 //! game process.
 
 pub mod derive;
+pub mod install;
 pub mod model;
 pub mod server;
 
