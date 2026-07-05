@@ -13,7 +13,7 @@ use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
 use tracing::debug;
 
-use crate::annexb;
+use ir_mux::h264 as annexb;
 
 /// Software pipeline producing a synthetic test pattern:
 /// - burned-in frame counter (top row) and millisecond timecode (below it) —

@@ -6,6 +6,8 @@
 //! `stsc`/`stco` trivial. No B-frames are supported (pts == dts), which is
 //! the pipeline contract everywhere in this project.
 
+pub mod h264;
+
 use ir_types::{Codec, CodecConfig, ColorInfo, EncodedPacket};
 
 #[derive(Debug, thiserror::Error)]

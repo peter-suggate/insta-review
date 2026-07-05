@@ -35,9 +35,27 @@ pub struct EngineHandle {
     join: Option<JoinHandle<()>>,
 }
 
+/// Cheap clonable handle for feeding markers from other threads (GSI).
+#[derive(Clone)]
+pub struct MarkerSender {
+    cmd_tx: Sender<EngineCommand>,
+}
+
+impl MarkerSender {
+    pub fn send(&self, marker: Marker) {
+        let _ = self.cmd_tx.send(EngineCommand::AddMarker(marker));
+    }
+}
+
 impl EngineHandle {
     pub fn clock(&self) -> CaptureClock {
         self.clock
+    }
+
+    pub fn marker_sender(&self) -> MarkerSender {
+        MarkerSender {
+            cmd_tx: self.cmd_tx.clone(),
+        }
     }
 
     /// Snapshot the last `window`. Returns `None` until the pipeline has

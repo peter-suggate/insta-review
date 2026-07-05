@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use ir_core::Engine;
-use ir_pipeline_test::{annexb, read_frame_index, TestPatternPipeline};
+use ir_mux::h264 as annexb;
+use ir_pipeline_test::{read_frame_index, TestPatternPipeline};
 use ir_types::{Codec, PipelineConfig};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;

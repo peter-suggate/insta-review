@@ -5,6 +5,9 @@ members = [
     "crates/ir-core",
     "crates/ir-mux",
     "crates/ir-pipeline-test",
+    "crates/ir-pipeline-win",
+    "crates/ir-gsi",
+    "crates/ir-winutil",
     "crates/ir-cli",
 ]
 
@@ -18,6 +21,9 @@ ir-types = { path = "crates/ir-types" }
 ir-core = { path = "crates/ir-core" }
 ir-mux = { path = "crates/ir-mux" }
 ir-pipeline-test = { path = "crates/ir-pipeline-test" }
+ir-pipeline-win = { path = "crates/ir-pipeline-win" }
+ir-gsi = { path = "crates/ir-gsi" }
+ir-winutil = { path = "crates/ir-winutil" }
 
 bytes = "1"
 crossbeam-channel = "0.5"

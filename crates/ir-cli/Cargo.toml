@@ -8,12 +8,24 @@ license.workspace = true
 name = "ir-cli"
 path = "src/main.rs"
 
+[features]
+# The synthetic test pipeline pulls in openh264 (a C build); optional so
+# the crate can be cross-checked from non-Windows hosts.
+default = ["test-pipeline"]
+test-pipeline = ["dep:ir-pipeline-test"]
+
 [dependencies]
 ir-types.workspace = true
 ir-core.workspace = true
 ir-mux.workspace = true
-ir-pipeline-test.workspace = true
+ir-pipeline-test = { workspace = true, optional = true }
+ir-gsi.workspace = true
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ir-pipeline-win.workspace = true
+ir-winutil.workspace = true

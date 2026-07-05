@@ -1,0 +1,28 @@
+[package]
+name = "ir-pipeline-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ir-types.workspace = true
+ir-core.workspace = true
+ir-mux.workspace = true
+bytes.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Performance",
+] }

@@ -7,9 +7,7 @@ license.workspace = true
 [dependencies]
 ir-types.workspace = true
 ir-core.workspace = true
+ir-mux.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 openh264 = { version = "0.9", features = ["source"] }
-
-[dev-dependencies]
-ir-mux.workspace = true
