@@ -41,14 +41,19 @@ impl LlmProvider for Codex {
             argv.push(cfg.model.clone());
         }
         argv.extend(cfg.extra_args.split_whitespace().map(String::from));
+        // `-` = read the prompt from stdin (see stdin_payload) — the prompt
+        // is too long for a Windows command line.
+        argv.push("-".into());
+        argv
+    }
+
+    fn stdin_payload(&self, req: &LlmRequest) -> Option<String> {
         // codex has no system-prompt flag in exec mode; prepend it.
-        let prompt = if req.system_prompt.is_empty() {
+        Some(if req.system_prompt.is_empty() {
             req.user_prompt.clone()
         } else {
             format!("{}\n\n---\n\n{}", req.system_prompt, req.user_prompt)
-        };
-        argv.push(prompt);
-        argv
+        })
     }
 
     fn result_file(&self) -> Option<&'static str> {
@@ -105,9 +110,11 @@ mod tests {
         assert_eq!(argv[0], "exec");
         assert_eq!(argv.iter().filter(|a| *a == "-i").count(), 2);
         assert!(argv.windows(2).any(|w| w[0] == "-m" && w[1] == "gpt-5"));
-        // System prompt is folded into the trailing prompt.
-        assert!(argv.last().unwrap().starts_with("sys"));
-        assert!(argv.last().unwrap().ends_with("user"));
+        // Prompt arrives via stdin ("-"); system prompt folded in there.
+        assert_eq!(argv.last().unwrap(), "-");
+        let stdin = Codex.stdin_payload(&req()).unwrap();
+        assert!(stdin.starts_with("sys"));
+        assert!(stdin.ends_with("user"));
     }
 
     #[test]

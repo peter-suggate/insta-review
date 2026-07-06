@@ -45,8 +45,13 @@ impl LlmProvider for Claude {
             argv.push(cfg.model.clone());
         }
         argv.extend(cfg.extra_args.split_whitespace().map(String::from));
-        argv.push(req.user_prompt.clone());
+        // No positional prompt: it arrives via stdin (see stdin_payload).
         argv
+    }
+
+    fn stdin_payload(&self, req: &LlmRequest) -> Option<String> {
+        // `claude -p` with no positional prompt reads the prompt from stdin.
+        Some(req.user_prompt.clone())
     }
 
     fn parse(&self, stdout: &str, _result_file: Option<&str>) -> Result<String, LlmError> {
@@ -100,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_last_arg_and_no_bare() {
+    fn prompt_goes_to_stdin_not_argv() {
         let req = LlmRequest {
             run_dir: ".".into(),
             system_prompt: "sys".into(),
@@ -116,7 +121,10 @@ mod tests {
             timeout_secs: 240,
         };
         let argv = Claude.build_argv(&req, &cfg);
-        assert_eq!(argv.last().unwrap(), "user");
+        // The prompt must NOT be in argv — Windows caps command lines at
+        // ~8 KiB through cmd /C, and prompts carry the full telemetry.
+        assert!(!argv.iter().any(|a| a == "user"));
+        assert_eq!(Claude.stdin_payload(&req).as_deref(), Some("user"));
         assert!(!argv.iter().any(|a| a == "--bare"));
         assert!(argv.windows(2).any(|w| w[0] == "--json-schema"));
     }

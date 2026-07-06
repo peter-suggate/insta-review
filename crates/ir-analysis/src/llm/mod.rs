@@ -66,6 +66,12 @@ pub trait LlmProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn default_binary(&self) -> &'static str;
     fn build_argv(&self, req: &LlmRequest, cfg: &LlmConfig) -> Vec<String>;
+    /// Content piped to the child's stdin. The user prompt goes here, not in
+    /// argv: Windows command lines cap at ~8 KiB through `cmd /C` (the npm
+    /// `.cmd` shim path), and the telemetry-laden prompt easily exceeds it.
+    fn stdin_payload(&self, _req: &LlmRequest) -> Option<String> {
+        None
+    }
     /// Some providers write the final message to a file in cwd instead of
     /// clean stdout (codex `--output-last-message`).
     fn result_file(&self) -> Option<&'static str> {
@@ -152,10 +158,7 @@ fn command(bin: &str, prefix: &[String]) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(prefix);
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW (tokio-native method)
     cmd
 }
 
@@ -195,11 +198,16 @@ pub async fn run_llm(
     let version = cli_version(&bin, &prefix).await;
     info!(bin, version, "invoking LLM CLI");
 
+    let stdin_payload = provider.stdin_payload(req);
     let started = Instant::now();
     let mut child = command(&bin, &prefix)
         .args(&argv)
         .current_dir(&req.run_dir)
-        .stdin(Stdio::null())
+        .stdin(if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -210,6 +218,19 @@ pub async fn run_llm(
             },
             _ => LlmError::Other(format!("spawn {bin}: {e}")),
         })?;
+
+    // Feed stdin from a task for the same reason the pipes are drained
+    // concurrently: a child that fills stdout before reading all of stdin
+    // would deadlock a sequential write. Dropping the handle closes the
+    // pipe so the CLI sees EOF.
+    if let Some(payload) = stdin_payload {
+        let mut stdin_pipe = child.stdin.take().expect("piped stdin");
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin_pipe.write_all(payload.as_bytes()).await;
+            let _ = stdin_pipe.shutdown().await;
+        });
+    }
 
     // Drain pipes concurrently — a full pipe would deadlock the child.
     let mut stdout_pipe = child.stdout.take().expect("piped stdout");
