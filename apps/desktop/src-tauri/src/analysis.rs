@@ -84,6 +84,7 @@ pub fn analysis_begin(
     app: AppHandle,
     state: State<AppState>,
     event: EventRef,
+    force: Option<bool>,
 ) -> Result<BeginResponse, String> {
     {
         let active = state.analysis.lock().unwrap();
@@ -100,12 +101,16 @@ pub fn analysis_begin(
         clip.as_ref().ok_or("no clip staged")?.clip.meta.clone()
     };
 
-    if let Some(report) = store::cached_report(&clip_mp4, &event.id) {
-        info!(event = %event.id, "analysis cache hit");
-        return Ok(BeginResponse {
-            cached: Some(report),
-            plan: None,
-        });
+    // `force` skips the cache — how a quick (local-cv) result is upgraded
+    // to a full LLM analysis of the same event.
+    if !force.unwrap_or(false) {
+        if let Some(report) = store::cached_report(&clip_mp4, &event.id) {
+            info!(event = %event.id, "analysis cache hit");
+            return Ok(BeginResponse {
+                cached: Some(report),
+                plan: None,
+            });
+        }
     }
 
     let plan = ir_analysis::plan_extraction(&event, &meta.frame_pts);
@@ -232,7 +237,12 @@ pub fn analysis_frame(
 /// Kick off the pipeline task: compose prompts, invoke the LLM CLI, parse,
 /// persist, emit. Returns immediately; results arrive as events.
 #[tauri::command]
-pub fn analysis_run(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+pub fn analysis_run(
+    app: AppHandle,
+    state: State<AppState>,
+    llm: Option<bool>,
+) -> Result<(), String> {
+    let llm = llm.unwrap_or(true);
     let (event, clip_mp4, dirs, plan, meta, received, frames, cancel) = {
         let mut active = state.analysis.lock().unwrap();
         let active = active.as_mut().ok_or("no analysis in progress")?;
@@ -265,7 +275,7 @@ pub fn analysis_run(app: AppHandle, state: State<AppState>) -> Result<(), String
     tauri::async_runtime::spawn(async move {
         let result = run_pipeline(
             &app, &event, &clip_mp4, &dirs, &plan, &meta, &received, frames, &cancel,
-            &settings, &analysis_cfg, &prompts_dir,
+            &settings, &analysis_cfg, &prompts_dir, llm,
         )
         .await;
         match result {
@@ -378,8 +388,10 @@ async fn run_pipeline(
     settings: &AppSettings,
     analysis_cfg: &ir_analysis::config::AnalysisConfig,
     prompts_dir: &std::path::Path,
+    llm: bool,
 ) -> Result<(AnalysisReport, serde_json::Value), (&'static str, LlmError)> {
     let fail = |stage: &'static str| move |e: LlmError| (stage, e);
+    let started = std::time::Instant::now();
 
     // ---- measure (local CV) ----------------------------------------------
     emit_progress(
@@ -407,26 +419,37 @@ async fn run_pipeline(
         "CV pass done"
     );
 
-    // Compact per-sample trace for the timeline overlay (movement state
-    // resolved per flow sample).
-    let overlay_trace: Vec<serde_json::Value> = cv_report
-        .flow
-        .iter()
-        .map(|s| {
-            let moving = cv_report
-                .movement
-                .iter()
-                .find(|iv| s.t >= iv.start_s && s.t <= iv.end_s)
-                .map(|iv| iv.state)
-                .unwrap_or(ir_analysis::cv::motion::MoveState::Unreliable);
-            json!({
-                "t": (s.t * 1000.0).round() / 1000.0,
-                "yawDps": (s.yaw_dps * 10.0).round() / 10.0,
-                "moving": moving,
-            })
-        })
-        .collect();
-    let overlay = json!({ "flow": overlay_trace });
+    // Compact per-sample trace for the timeline overlay and drawer chart.
+    let overlay = json!({ "flow": cv::flow_trace_json(&cv_report) });
+
+    // ---- quick mode: deterministic CV report, no LLM ----------------------
+    if !llm {
+        let mut degradations = Vec::new();
+        if !frames.is_empty() && cv_report.flow.is_empty() {
+            degradations.push("CV produced no flow trace (frames too sparse?)".into());
+        }
+        let report = cv::local_report(
+            event,
+            &cv_report,
+            started.elapsed().as_millis() as u64,
+            received.iter().map(|&t| t as f64 / 1e6).collect(),
+            degradations,
+        );
+        store::persist_report(dirs, &report)
+            .map_err(|e| ("persisting", LlmError::Other(e.to_string())))?;
+        if let Err(e) = store::promote_frames(dirs) {
+            warn!("could not promote frames for export: {e}");
+        }
+        if let Err(e) = store::write_export_manifest(clip_mp4) {
+            warn!("could not write export manifest: {e}");
+        }
+        info!(
+            event = %event.id,
+            findings = report.findings.len(),
+            "quick (local-cv) analysis complete"
+        );
+        return Ok((report, overlay));
+    }
 
     // ---- compose ---------------------------------------------------------
     emit_progress(app, "composing", "rendering prompts".into(), 0, 0);
@@ -596,6 +619,7 @@ async fn run_pipeline(
             "shots": cv_report.shots,
             "flicks": cv_report.flicks,
             "movementIntervals": cv_report.movement,
+            "flowTrace": overlay["flow"].clone(),
         }),
         provider: ProviderInfo {
             provider: settings.llm_provider.clone(),
@@ -609,6 +633,14 @@ async fn run_pipeline(
     };
     store::persist_report(dirs, &report)
         .map_err(|e| ("persisting", LlmError::Other(e.to_string())))?;
+    // Best-effort export surface (frames beside the cached report + the
+    // clip-level import manifest) — a failure here shouldn't fail the run.
+    if let Err(e) = store::promote_frames(dirs) {
+        warn!("could not promote frames for export: {e}");
+    }
+    if let Err(e) = store::write_export_manifest(clip_mp4) {
+        warn!("could not write export manifest: {e}");
+    }
     info!(
         event = %event.id,
         findings = report.findings.len(),

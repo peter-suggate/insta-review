@@ -1,12 +1,14 @@
 // Timeline strip: playhead, keyframe ticks, trigger line, GSI markers
 // (drawn as soft bands + icons because GSI timing is approximate).
 
+// Color carries judgment: kill good, death bad, damage warning. Contextual
+// events (round phase, bomb, shots) stay gray.
 const MARKER_STYLE = {
   kill: { color: "#50c878", label: "K" },
   death: { color: "#ff5a5a", label: "D" },
   damage_taken: { color: "#ffb050", label: "·" },
-  round_phase: { color: "#5090ff", label: "R" },
-  bomb: { color: "#ffe050", label: "B" },
+  round_phase: { color: "#8a8a94", label: "R" },
+  bomb: { color: "#8a8a94", label: "B" },
   shot_fired: { color: "#9a9aa4", label: "s" },
 };
 
@@ -23,6 +25,9 @@ export class Timeline {
     this.triggerUs = 0;
     this.gsiOffsetUs = 0;
     this.thumbs = null; // filmstrip ImageBitmaps, left to right
+    // Display-time (µs) of kill/death markers analyzed this session —
+    // drawn with a small accent underline so "already coached" is visible.
+    this.analyzedUs = new Set();
 
     const seekFromEvent = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -42,7 +47,15 @@ export class Timeline {
       seekFromEvent(e);
     });
     canvas.addEventListener("pointermove", (e) => {
-      if (dragging) seekFromEvent(e);
+      if (dragging) {
+        seekFromEvent(e);
+        return;
+      }
+      // Surface that kill/death icons are clickable (AI coach).
+      const hit = this.onMarkerClick ? this.markerAt(e) : null;
+      canvas.title = hit
+        ? `AI coach: analyze this ${hit.kind.type} (click, or press E)`
+        : "";
     });
     canvas.addEventListener("pointerup", () => (dragging = false));
   }
@@ -55,6 +68,13 @@ export class Timeline {
     this.gsiOffsetUs = gsiOffsetUs;
     this.thumbs = null; // stale filmstrip belongs to the previous clip
     this.analysis = null; // traces belong to the previous clip too
+    this.analyzedUs.clear();
+    this.draw();
+  }
+
+  // Badge the marker at this display time as analyzed (session-local).
+  markAnalyzed(displayUs) {
+    this.analyzedUs.add(Math.round(displayUs));
     this.draw();
   }
 
@@ -161,15 +181,24 @@ export class Timeline {
       ctx.fillText(style.label, x(t), 13 * dpr);
     }
 
+    // Analyzed badge: a short accent underline beneath the marker icon.
+    ctx.fillStyle = "#50c878";
+    for (const us of this.analyzedUs) {
+      if (us < 0 || us > this.durationUs) continue;
+      ctx.fillRect(x(us) - 5 * dpr, 14 * dpr, 10 * dpr, 1.5 * dpr);
+    }
+
     // CV analysis overlay: movement strip + yaw-velocity curve.
     if (this.analysis?.flow?.length) {
       const flow = this.analysis.flow;
       const stripY = 15 * dpr,
         stripH = 3 * dpr;
+      // Grayscale: light = moving, dim = still (color is reserved for
+      // verdicts; movement is context). Matches the drawer's fight strip.
       const stateColor = {
-        stationary: "#50c87855",
-        moving: "#ffb050cc",
-        unreliable: "#55555588",
+        stationary: "#50505a66",
+        moving: "#c9c9d2cc",
+        unreliable: "#33333866",
       };
       for (let i = 0; i < flow.length; i++) {
         const t0 = i > 0 ? flow[i - 1].t : flow[i].t - 0.017;
@@ -181,7 +210,7 @@ export class Timeline {
       const mid = h * 0.55;
       const amp = h * 0.3;
       const vmax = Math.max(200, ...flow.map((s) => Math.abs(s.yawDps)));
-      ctx.strokeStyle = "#5090ffaa";
+      ctx.strokeStyle = "#a8a8b2aa";
       ctx.lineWidth = dpr;
       ctx.beginPath();
       for (let i = 0; i < flow.length; i++) {

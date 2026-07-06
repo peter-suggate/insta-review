@@ -4,9 +4,11 @@
 //! them offline.
 //!
 //! ```text
+//! clip_1751772000_001.export.json  # import manifest (clip + all events)
 //! clip_1751772000_001.analysis/
 //!   kill_9200ms/
 //!     report.json              # latest success = the cache
+//!     frames/                  # promoted from the latest successful run
 //!     runs/run_1751772100/
 //!       request.json  frames/  prompt.system.md  prompt.user.md
 //!       llm_stdout.txt  llm_stderr.txt  llm_meta.json  report.json
@@ -57,6 +59,98 @@ pub fn persist_report(dirs: &RunDirs, report: &AnalysisReport) -> std::io::Resul
     let json = serde_json::to_string_pretty(report)?;
     std::fs::write(dirs.run_dir.join("report.json"), &json)?;
     std::fs::write(dirs.event_dir.join("report.json"), &json)
+}
+
+/// Copy the run's evidence frames up to `event_dir/frames/`, mirroring how
+/// `persist_report` promotes the report: the event dir is the import
+/// surface, self-contained regardless of which run produced it.
+pub fn promote_frames(dirs: &RunDirs) -> std::io::Result<usize> {
+    let dst_dir = dirs.event_dir.join("frames");
+    std::fs::create_dir_all(&dst_dir)?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(&dirs.frames_dir)?.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".jpg") {
+            std::fs::copy(entry.path(), dst_dir.join(&name))?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+/// One-file import surface: `clip_X.export.json` next to the clip indexes
+/// the mp4, its meta sidecar, and every analyzed event's report, promoted
+/// frames, and feedback — all as manifest-relative paths with forward
+/// slashes, so the clip directory can be moved or shared wholesale.
+/// Rewritten on save and after every successful analysis; idempotent.
+pub fn write_export_manifest(clip_mp4: &Path) -> std::io::Result<PathBuf> {
+    let file_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let clip_name = file_name(clip_mp4)
+        .ok_or_else(|| std::io::Error::other("clip path has no file name"))?;
+    let ana_dir = analysis_dir(clip_mp4);
+    let ana_name = file_name(&ana_dir).unwrap_or_default();
+
+    let mut events = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&ana_dir) {
+        let mut event_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        event_dirs.sort();
+        for event_dir in event_dirs {
+            let Some(event_id) = file_name(&event_dir) else { continue };
+            // Only events with a schema-compatible report are importable.
+            let Ok(text) = std::fs::read_to_string(event_dir.join("report.json")) else {
+                continue;
+            };
+            let Ok(report) = serde_json::from_str::<AnalysisReport>(&text) else {
+                continue;
+            };
+            if report.schema_version != SCHEMA_VERSION {
+                continue;
+            }
+            let mut frames: Vec<String> = std::fs::read_dir(event_dir.join("frames"))
+                .map(|it| {
+                    it.flatten()
+                        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                        .filter(|n| n.ends_with(".jpg"))
+                        .map(|n| format!("{ana_name}/{event_id}/frames/{n}"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            frames.sort();
+            let feedback = event_dir
+                .join("feedback.json")
+                .is_file()
+                .then(|| format!("{ana_name}/{event_id}/feedback.json"));
+            events.push(serde_json::json!({
+                "id": event_id,
+                "atS": report.event.at_s,
+                "kind": report.event.kind,
+                "summary": report.summary,
+                "report": format!("{ana_name}/{event_id}/report.json"),
+                "frames": frames,
+                "feedback": feedback,
+            }));
+        }
+    }
+
+    let meta_sidecar = clip_mp4.with_extension("json");
+    let manifest = serde_json::json!({
+        "kind": "insta-review-export",
+        "schemaVersion": SCHEMA_VERSION,
+        "exportedAtS": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "clip": clip_name,
+        "meta": meta_sidecar.is_file().then(|| file_name(&meta_sidecar)).flatten(),
+        "events": events,
+    });
+    let path = clip_mp4.with_extension("export.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest)?)?;
+    Ok(path)
 }
 
 pub fn write_json<T: serde::Serialize>(
@@ -177,6 +271,49 @@ mod tests {
         old.schema_version = SCHEMA_VERSION + 1;
         persist_report(&dirs, &old).unwrap();
         assert!(cached_report(&mp4, "death_9200ms").is_none());
+    }
+
+    #[test]
+    fn export_manifest_indexes_promoted_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp4 = tmp.path().join("clip_1_001.mp4");
+        std::fs::write(mp4.with_extension("json"), "{}").unwrap();
+
+        let dirs = prepare_run(&mp4, "death_9200ms", 1).unwrap();
+        std::fs::write(dirs.frames_dir.join("f_009200ms.jpg"), b"jpg").unwrap();
+        persist_report(&dirs, &report("death_9200ms")).unwrap();
+        assert_eq!(promote_frames(&dirs).unwrap(), 1);
+        record_feedback(&mp4, "death_9200ms", 0, true).unwrap();
+
+        let path = write_export_manifest(&mp4).unwrap();
+        assert_eq!(path, mp4.with_extension("export.json"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["kind"], "insta-review-export");
+        assert_eq!(v["clip"], "clip_1_001.mp4");
+        assert_eq!(v["meta"], "clip_1_001.json");
+        let ev = &v["events"][0];
+        assert_eq!(ev["id"], "death_9200ms");
+        assert_eq!(ev["report"], "clip_1_001.analysis/death_9200ms/report.json");
+        assert_eq!(
+            ev["frames"][0],
+            "clip_1_001.analysis/death_9200ms/frames/f_009200ms.jpg"
+        );
+        assert_eq!(
+            ev["feedback"],
+            "clip_1_001.analysis/death_9200ms/feedback.json"
+        );
+
+        // Stale-schema events are excluded from the manifest.
+        let dirs2 = prepare_run(&mp4, "kill_2ms", 2).unwrap();
+        let mut old = report("kill_2ms");
+        old.schema_version = SCHEMA_VERSION + 1;
+        persist_report(&dirs2, &old).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(write_export_manifest(&mp4).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["events"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -115,6 +115,7 @@ function clearAll() {
   if (!clipMeta) return;
   clipMeta = null; // aborts the in-flight filmstrip build too
   coach.close(); // cancels any in-flight analysis; findings were this clip's
+  setAiStatus({ state: "idle" }); // pill referred to this clip's analysis
   player.reset();
   const video = $("video");
   video.getContext("2d").clearRect(0, 0, video.width, video.height);
@@ -160,7 +161,33 @@ const coach = new Coach({
     player.seekToUs(tS * 1e6).catch(console.error);
   },
   onTrace: (trace) => timeline.setAnalysis(trace),
+  onState: (s) => {
+    setAiStatus(s);
+    if (s.state === "done" && s.atS != null) timeline.markAnalyzed(s.atS * 1e6);
+  },
 });
+
+// Ambient coach state in the status bar; clicking it re-opens the drawer.
+function setAiStatus({ state, detail, findings, cached, message }) {
+  const pill = $("ai-status");
+  pill.classList.remove("running", "done", "error");
+  if (state === "idle") {
+    pill.classList.add("hidden");
+    return;
+  }
+  pill.classList.remove("hidden");
+  pill.classList.add(state);
+  const text = {
+    running: `coach · ${detail || "working…"}`,
+    done:
+      `✓ coach · ${findings} finding${findings === 1 ? "" : "s"}` +
+      (cached ? " · cached" : ""),
+    error: "⚠ coach failed",
+  }[state];
+  $("ai-status-text").textContent = text;
+  pill.title = state === "error" ? message : "AI coach — click to open";
+}
+$("ai-status").addEventListener("click", () => coach.reopen());
 
 // Kill/death marker nearest the playhead (display times, i.e. GSI-shifted).
 function eventMarkerNearPlayhead() {

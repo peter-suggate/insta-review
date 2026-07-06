@@ -10,7 +10,9 @@ use ir_types::ClipGsiSample;
 use serde::Serialize;
 
 use crate::config::AnalysisConfig;
-use crate::types::EventRef;
+use crate::types::{
+    AnalysisReport, Evidence, EventRef, Finding, FindingSource, ProviderInfo, SCHEMA_VERSION,
+};
 
 /// Pinhole calibration for the clip: pixels-per-radian at full resolution.
 /// CS2 vertical FOV is 73.74° at every aspect; horizontal FOV is 90° for
@@ -125,6 +127,117 @@ pub fn analyze(
         flicks,
         candidates,
         versions,
+    }
+}
+
+/// Compact per-sample trace for UI overlays and report metrics: movement
+/// state resolved per flow sample, values rounded to keep JSON small.
+pub fn flow_trace_json(cv: &CvReport) -> Vec<serde_json::Value> {
+    cv.flow
+        .iter()
+        .map(|s| {
+            let moving = cv
+                .movement
+                .iter()
+                .find(|iv| s.t >= iv.start_s && s.t <= iv.end_s)
+                .map(|iv| iv.state)
+                .unwrap_or(motion::MoveState::Unreliable);
+            serde_json::json!({
+                "t": (s.t * 1000.0).round() / 1000.0,
+                "yawDps": (s.yaw_dps * 10.0).round() / 10.0,
+                "moving": moving,
+            })
+        })
+        .collect()
+}
+
+/// Deterministic "quick analysis" report from the CV measurements alone —
+/// no LLM. Same schema as the coached report so caching, export, and the
+/// drawer treat both identically; `provider: "local-cv"` distinguishes it
+/// (and is the UI's cue to offer the LLM upgrade).
+pub fn local_report(
+    event: &EventRef,
+    cv: &CvReport,
+    duration_ms: u64,
+    frames_s: Vec<f64>,
+    degradations: Vec<String>,
+) -> AnalysisReport {
+    let findings = cv
+        .candidates
+        .iter()
+        .map(|c| Finding {
+            kind: c.kind.clone(),
+            severity: c.severity,
+            confidence: c.confidence,
+            time_range: (c.start_s, c.end_s),
+            evidence: vec![Evidence {
+                t: c.end_s,
+                frame_label: None,
+                note: c.note.clone(),
+            }],
+            metrics: c.metrics.clone(),
+            coaching: c.note.clone(),
+            source: FindingSource::Cv,
+        })
+        .collect();
+
+    let fight: Vec<&motion::ShotEvent> = cv
+        .shots
+        .iter()
+        .filter(|s| s.t >= event.at_s - 3.0 && s.t <= event.at_s + 0.5)
+        .collect();
+    let shots_total: u32 = fight.iter().map(|s| s.count).sum();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let count = |kind: &str| cv.candidates.iter().filter(|c| c.kind == kind).count();
+
+    let mut lines = vec![if fight.is_empty() {
+        "No shots detected in the 3 s before the event (GSI ammo trace).".to_string()
+    } else {
+        format!(
+            "{shots_total} shot{} in {} burst{} in the 3 s before the event.",
+            plural(shots_total as usize),
+            fight.len(),
+            plural(fight.len())
+        )
+    }];
+    for (kind, label) in [
+        ("moving_while_shooting", "Bursts fired while moving"),
+        ("fired_before_settled", "Shots before movement settled"),
+        ("good_counter_strafe", "Good counter-strafes"),
+        ("flick_overshoot", "Flicks that overshot"),
+        ("clean_flick", "Clean flicks"),
+    ] {
+        let n = count(kind);
+        if n > 0 {
+            lines.push(format!("{label}: {n}."));
+        }
+    }
+    lines.push(
+        "Local measurements only (optical flow + GSI ammo trace) — no AI interpretation."
+            .to_string(),
+    );
+
+    AnalysisReport {
+        schema_version: SCHEMA_VERSION,
+        event: event.clone(),
+        summary: lines.join(" "),
+        findings,
+        metrics: serde_json::json!({
+            "candidates": cv.candidates,
+            "shots": cv.shots,
+            "flicks": cv.flicks,
+            "movementIntervals": cv.movement,
+            "flowTrace": flow_trace_json(cv),
+        }),
+        provider: ProviderInfo {
+            provider: "local-cv".into(),
+            model: String::new(),
+            cli_version: "local".into(),
+            duration_ms,
+        },
+        degradations,
+        analyzer_versions: cv.versions.clone(),
+        frames: frames_s,
     }
 }
 
@@ -316,6 +429,46 @@ mod tests {
             "candidates: {:?}",
             report.candidates.iter().map(|c| &c.kind).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn local_report_carries_cv_findings() {
+        let frames: Vec<LumaFrame> = (0..60)
+            .map(|i| frame(i * 16_667, 0, i as i64 * 3))
+            .collect();
+        let gsi = vec![
+            ClipGsiSample {
+                at: 0.3,
+                state: GsiState {
+                    weapon: "weapon_ak47".into(),
+                    ammo_clip: Some(30),
+                    health: Some(100),
+                    flashed: 0,
+                    smoked: 0,
+                },
+            },
+            ClipGsiSample {
+                at: 0.5,
+                state: GsiState {
+                    weapon: "weapon_ak47".into(),
+                    ammo_clip: Some(26),
+                    health: Some(100),
+                    flashed: 0,
+                    smoked: 0,
+                },
+            },
+        ];
+        let cv = analyze(&event(0.8), &store(frames), &gsi, FULL, true, 0.0, &cfg());
+        let report = local_report(&event(0.8), &cv, 7, vec![0.5, 0.8], vec![]);
+        assert_eq!(report.provider.provider, "local-cv");
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == "moving_while_shooting"
+                && f.source == crate::types::FindingSource::Cv));
+        assert!(report.summary.contains("burst"));
+        assert!(report.summary.contains("no AI interpretation"));
+        assert_eq!(report.frames, vec![0.5, 0.8]);
     }
 
     #[test]

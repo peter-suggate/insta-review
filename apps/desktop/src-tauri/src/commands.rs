@@ -64,6 +64,12 @@ pub fn save_current_clip(
     )
     .map_err(|e| e.to_string())?;
 
+    // Import manifest beside the clip; indexes any analyses already run
+    // (none yet on a plain save) and is refreshed after each analysis.
+    if let Err(e) = ir_analysis::store::write_export_manifest(&path) {
+        tracing::warn!("could not write export manifest: {e}");
+    }
+
     info!(path = %path.display(), "clip saved");
     current.saved_path = Some(path.clone());
     Ok(path)

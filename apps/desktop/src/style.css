@@ -89,6 +89,23 @@ body { display: flex; flex-direction: column; }
   padding: 5px 10px; color: var(--dim); font-size: 11.5px;
 }
 
+/* AI coach status pill: pulsing dot while a run is in flight, green when
+   findings are ready, red on failure. Click re-opens the drawer. */
+#ai-status {
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+#ai-status .ai-dot {
+  display: none;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  animation: preview-pulse 1.2s ease-in-out infinite;
+}
+#ai-status.running .ai-dot { display: inline-block; }
+#ai-status.done { color: var(--accent); }
+#ai-status.error { color: #ff7a7a; }
+
 .hidden { display: none !important; }
 
 #settings {
@@ -193,3 +210,16 @@ button.danger { color: #ff7a7a; }
   border: 1px solid #26262e;
 }
 .coach-frames img:hover { border-color: var(--accent); }
+.coach-ask {
+  align-self: flex-start;
+  color: var(--accent); border-color: #2f4a3a;
+}
+.coach-chart {
+  width: 100%; height: auto;
+  background: #131318;
+  border: 1px solid #26262e; border-radius: 6px;
+  cursor: pointer;
+}
+.coach-gauge { display: flex; align-items: center; gap: 8px; }
+.coach-gauge svg { flex: none; }
+.coach-gauge span { color: var(--dim); font-size: 11px; }
