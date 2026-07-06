@@ -21,6 +21,7 @@ ir-types.workspace = true
 ir-core.workspace = true
 ir-mux.workspace = true
 ir-gsi.workspace = true
+ir-analysis.workspace = true
 ir-pipeline-test = { workspace = true, optional = true }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"

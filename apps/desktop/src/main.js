@@ -1,3 +1,4 @@
+import { Coach } from "./coach.js";
 import { Player, b64ToBytes } from "./player.js";
 import { Timeline } from "./timeline.js";
 
@@ -147,6 +148,20 @@ function toast(msg, ms = 2500) {
   el._t = setTimeout(() => el.classList.add("hidden"), ms);
 }
 
+const coach = new Coach({ onToast: toast });
+
+// Kill/death marker nearest the playhead (display times, i.e. GSI-shifted).
+function eventMarkerNearPlayhead() {
+  const candidates = (clipMeta?.meta.markers || []).filter((m) =>
+    ["kill", "death"].includes(m.kind.type)
+  );
+  if (!candidates.length) return null;
+  const nowS = player.playheadUs / 1e6 - gsiOffsetUs / 1e6;
+  return candidates.reduce((best, m) =>
+    Math.abs(m.at - nowS) < Math.abs(best.at - nowS) ? m : best
+  );
+}
+
 async function loadClip(payload) {
   // Breadcrumbs into the app log: if a load wedges, the last one names
   // the stage that hung.
@@ -188,6 +203,13 @@ async function loadClip(payload) {
       mark(`${ha} probe error: ${e.message || e}`);
     }
   }
+
+  coach.attachClip({
+    samples: payload.samples,
+    buffer,
+    codec: payload.codec,
+    gsiOffset: payload.gsiOffset,
+  });
 
   timeline.load({
     durationUs: player.durationUs(),
@@ -541,6 +563,15 @@ async function loadClipLatest(payload) {
     await loadClip(payload);
     loadedClipId = payload.id;
     if (payload.autotest) selfTest();
+    // Dev hook (IR_AUTOANALYZE=1): analyze the trigger moment without a
+    // keyboard — synthesizes a death event if the clip has no markers.
+    else if (payload.autoanalyze) {
+      const marker = eventMarkerNearPlayhead() || {
+        at: payload.meta.trigger_at - payload.gsiOffset,
+        kind: { type: "death" },
+      };
+      coach.openForEvent(marker).catch(console.error);
+    }
   } catch (e) {
     console.error(e);
     toast(`failed to load clip: ${e.message || e}`, 6000);
@@ -642,6 +673,17 @@ document.addEventListener("keydown", (e) => {
       }
       break;
     }
+    case "e":
+    case "E": {
+      const marker = eventMarkerNearPlayhead();
+      if (!marker) {
+        toast("no kill/death marker in this clip");
+        break;
+      }
+      player.pause();
+      coach.openForEvent(marker).catch((err) => toast(`analyze failed: ${err}`, 5000));
+      break;
+    }
     case "z":
     case "Z":
       player.toggleZoom();
@@ -665,6 +707,10 @@ document.addEventListener("keydown", (e) => {
       toggleSettings(true);
       break;
     case "Escape":
+      if (coach.visible()) {
+        coach.close();
+        break;
+      }
       player.pause();
       invoke("close_review");
       break;
@@ -691,6 +737,12 @@ const FIELDS = [
   ["gsiToken", "GSI token", "text"],
   ["gsiOffsetSeconds", "GSI marker offset (s)", "number"],
   ["stretch43", "Stretch 4:3 clips to 16:9", "checkbox"],
+  ["llmProvider", "Coach LLM (claude/codex)", "text"],
+  ["llmModel", "LLM model (blank = default)", "text"],
+  ["llmBinaryPath", "LLM binary path (blank = PATH)", "text"],
+  ["llmExtraArgs", "LLM extra args", "text"],
+  ["llmTimeoutSeconds", "LLM timeout (s)", "number"],
+  ["analysisMinConfidence", "Min finding confidence", "number"],
 ];
 
 async function toggleSettings(show) {
@@ -734,7 +786,7 @@ function collectSettings() {
     else out[key] = input.value;
   }
   // Integer fields.
-  for (const k of ["fps", "quality", "gsiPort", "captureCropPx"])
+  for (const k of ["fps", "quality", "gsiPort", "captureCropPx", "llmTimeoutSeconds"])
     out[k] = Math.round(out[k]);
   return out;
 }

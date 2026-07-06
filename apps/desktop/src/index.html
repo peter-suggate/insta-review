@@ -24,6 +24,20 @@
       <span id="hud-flags"></span>
     </div>
     <div id="toast" class="hidden"></div>
+    <div id="coach" class="hidden">
+      <div id="coach-head">
+        <span id="coach-title">Coach</span>
+        <button id="coach-close" title="Close">×</button>
+      </div>
+      <div id="coach-provider"></div>
+      <div id="coach-progress" class="hidden">
+        <div id="coach-stage"></div>
+        <div id="coach-bar"><div id="coach-bar-fill"></div></div>
+        <button id="coach-cancel">Cancel</button>
+      </div>
+      <div id="coach-error" class="hidden"></div>
+      <div id="coach-body"></div>
+    </div>
   </div>
 
   <div id="bottom">
@@ -42,8 +56,8 @@
     <div id="statusbar">
       <span id="hints">
         R replay · Space play/pause · , . frame step · J K L · ← → ±1s ·
-        1–5 speed · M next marker · Z zoom · A aspect · S save · C clear ·
-        G settings · Esc close
+        1–5 speed · M next marker · E analyze · Z zoom · A aspect · S save ·
+        C clear · G settings · Esc close
       </span>
     </div>
   </div>

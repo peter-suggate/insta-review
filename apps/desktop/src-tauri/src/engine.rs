@@ -172,9 +172,10 @@ pub fn trigger_snapshot(app: &AppHandle) {
             "openRewind": settings.open_rewind_seconds,
             "gsiOffset": settings.gsi_offset_seconds,
             "stretch43": settings.stretch_43,
-            // Dev hook: frontend runs a scripted step/play self-test and
-            // reports via player_status.
+            // Dev hooks: scripted player self-test / scripted analysis,
+            // reporting via player_status.
             "autotest": std::env::var("IR_AUTOTEST").is_ok(),
+            "autoanalyze": std::env::var("IR_AUTOANALYZE").is_ok(),
         });
 
         *state.clip.lock().unwrap() = Some(CurrentClip {
@@ -182,6 +183,7 @@ pub fn trigger_snapshot(app: &AppHandle) {
             clip,
             blob,
             payload: payload.clone(),
+            saved_path: None,
         });
 
         if let Err(e) = app.emit("clip-ready", payload) {

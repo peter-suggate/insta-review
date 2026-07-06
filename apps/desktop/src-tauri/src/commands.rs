@@ -22,11 +22,18 @@ pub fn close_review(app: AppHandle, state: State<AppState>) {
     let _ = &state;
 }
 
-/// Write the staged clip to the clips directory. Returns the mp4 path.
-#[tauri::command]
-pub fn save_clip(app: AppHandle, state: State<AppState>) -> Result<String, String> {
-    let clip_guard = state.clip.lock().unwrap();
-    let current = clip_guard.as_ref().ok_or("no clip staged")?;
+/// Write the staged clip to the clips directory (idempotent: repeated calls
+/// return the already-saved path). Shared by the `S` key and the analysis
+/// path, which auto-saves so its artifacts live next to a real file.
+pub fn save_current_clip(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<std::path::PathBuf, String> {
+    let mut clip_guard = state.clip.lock().unwrap();
+    let current = clip_guard.as_mut().ok_or("no clip staged")?;
+    if let Some(path) = &current.saved_path {
+        return Ok(path.clone());
+    }
 
     let dir = {
         let settings = state.settings.lock().unwrap();
@@ -58,7 +65,14 @@ pub fn save_clip(app: AppHandle, state: State<AppState>) -> Result<String, Strin
     .map_err(|e| e.to_string())?;
 
     info!(path = %path.display(), "clip saved");
-    Ok(path.display().to_string())
+    current.saved_path = Some(path.clone());
+    Ok(path)
+}
+
+/// Write the staged clip to the clips directory. Returns the mp4 path.
+#[tauri::command]
+pub fn save_clip(app: AppHandle, state: State<AppState>) -> Result<String, String> {
+    save_current_clip(&app, &state).map(|p| p.display().to_string())
 }
 
 #[tauri::command]

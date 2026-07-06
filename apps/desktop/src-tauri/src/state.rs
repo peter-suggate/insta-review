@@ -38,6 +38,18 @@ pub struct AppSettings {
     pub clips_dir: Option<PathBuf>,
     /// Render 4:3 clips stretched to 16:9 (as seen in-game).
     pub stretch_43: bool,
+    /// Coaching LLM: "claude" or "codex" (headless CLI, uses the user's
+    /// subscription login).
+    pub llm_provider: String,
+    /// Model override; empty = provider default.
+    pub llm_model: String,
+    /// Explicit CLI binary path; empty = resolve from PATH.
+    pub llm_binary_path: String,
+    /// Extra CLI args, whitespace-split — escape hatch for flag drift.
+    pub llm_extra_args: String,
+    pub llm_timeout_seconds: u32,
+    /// Findings below this confidence are collapsed in the UI.
+    pub analysis_min_confidence: f32,
 }
 
 impl Default for AppSettings {
@@ -58,6 +70,12 @@ impl Default for AppSettings {
             gsi_offset_seconds: -0.25,
             clips_dir: None,
             stretch_43: true,
+            llm_provider: "claude".into(),
+            llm_model: String::new(),
+            llm_binary_path: String::new(),
+            llm_extra_args: String::new(),
+            llm_timeout_seconds: 240,
+            analysis_min_confidence: 0.5,
         }
     }
 }
@@ -99,6 +117,9 @@ pub struct CurrentClip {
     /// The clip-ready payload, re-served via `current_clip` so a webview
     /// that missed the event (minimized/throttled) can catch up.
     pub payload: serde_json::Value,
+    /// Set once the clip has been written to the clips dir (saving is
+    /// idempotent; analysis auto-saves so its artifacts have a home).
+    pub saved_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -108,6 +129,8 @@ pub struct AppState {
     pub clip: Mutex<Option<CurrentClip>>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: Mutex<PathBuf>,
+    /// In-flight coaching analysis (single-flight).
+    pub analysis: Mutex<Option<crate::analysis::ActiveAnalysis>>,
     pub clip_counter: AtomicU32,
     /// Millis-since-epoch of the last accepted trigger (hotkey debounce).
     pub last_trigger_ms: AtomicU64,

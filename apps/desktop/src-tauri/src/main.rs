@@ -3,6 +3,7 @@
 
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
+mod analysis;
 mod commands;
 mod engine;
 mod state;
@@ -100,6 +101,10 @@ fn main() {
             commands::install_gsi_cfg,
             commands::quit_app,
             commands::player_status,
+            analysis::analysis_begin,
+            analysis::analysis_frame,
+            analysis::analysis_run,
+            analysis::analysis_cancel,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -114,6 +119,9 @@ fn main() {
             let settings = AppSettings::load(&settings_path);
             *state.settings_path.lock().unwrap() = settings_path;
             *state.settings.lock().unwrap() = settings.clone();
+
+            // Editable coaching prompt templates (missing files only).
+            analysis::ensure_prompt_defaults(&handle);
 
             // Capture + GSI.
             if let Err(e) = engine::restart_capture(&handle) {
