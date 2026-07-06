@@ -78,6 +78,7 @@ const player = new Player($("video"), {
     if (player.stretch) flags.push("4:3→16:9");
     $("hud-flags").textContent = flags.join(" · ");
     syncControls();
+    layoutCoach(); // stretch toggle changes the displayed aspect
   },
 });
 
@@ -128,6 +129,7 @@ function clearAll() {
   });
   capturedAtMs = null;
   updateCapturedHud();
+  layoutCoach(); // back to the default width; the wide clip is gone
   $("hud").classList.add("hidden");
   $("waiting").classList.remove("hidden");
   for (const b of document.querySelectorAll("#controls button")) b.disabled = true;
@@ -153,6 +155,27 @@ function toast(msg, ms = 2500) {
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.add("hidden"), ms);
 }
+
+// Widen the coach drawer into the letterbox margin when the clip is
+// narrower than the stage (square capture region, 4:3 unstretched): that
+// space is otherwise dead, and the charts/frames benefit from it. The
+// video stays centered, so the guaranteed-empty right margin is half the
+// spare width; the drawer never eats into the picture.
+function layoutCoach() {
+  const m = clipMeta?.meta;
+  const stage = $("stage").getBoundingClientRect();
+  let width = 340;
+  if (m && m.width > 0 && m.height > 0 && stage.height > 0) {
+    const is43 = Math.abs(m.width / m.height - 4 / 3) < 0.05;
+    const aspect = player.stretch && is43 ? 16 / 9 : m.width / m.height;
+    const rightMargin = (stage.width - stage.height * aspect) / 2;
+    width = Math.round(
+      Math.min(Math.max(340, rightMargin), stage.width * 0.45)
+    );
+  }
+  $("coach").style.width = `${width}px`;
+}
+window.addEventListener("resize", layoutCoach);
 
 const coach = new Coach({
   onToast: toast,
@@ -259,6 +282,7 @@ async function loadClip(payload) {
     triggerUs: payload.meta.trigger_at * 1e6,
     gsiOffsetUs,
   });
+  layoutCoach();
 
   // Open paused just before the moment of interest: 1 s before the most
   // recent death (the hotkey is pressed after dying), else 1 s before the
