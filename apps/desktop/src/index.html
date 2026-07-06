@@ -16,6 +16,7 @@
       <span id="hud-time">0.00 / 0.00</span>
       <span id="hud-frame">f 0</span>
       <span id="hud-rate">1×</span>
+      <span id="hud-captured"></span>
       <span id="hud-flags"></span>
     </div>
     <div id="toast" class="hidden"></div>
@@ -23,10 +24,20 @@
 
   <div id="bottom">
     <canvas id="timeline"></canvas>
+    <div id="controls">
+      <button id="btn-replay" title="Replay the last moments (R / Enter)" disabled>⟲ replay</button>
+      <div class="group">
+        <button id="btn-step-back" title="Step back one frame (,)" disabled>⏴</button>
+        <button id="btn-play" title="Play / pause (Space)" disabled>▶</button>
+        <button id="btn-step-fwd" title="Step forward one frame (.)" disabled>⏵</button>
+      </div>
+      <span id="speed-label">speed</span>
+      <div class="group" id="speeds"></div>
+    </div>
     <div id="statusbar">
       <span id="hints">
-        Space play/pause · , . frame step · J K L · ← → ±1s · 1–5 speed ·
-        M next marker · Z zoom · A aspect · S save · G settings · Esc close
+        R replay · Space play/pause · , . frame step · J K L · ← → ±1s ·
+        1–5 speed · M next marker · Z zoom · A aspect · S save · G settings · Esc close
       </span>
     </div>
   </div>

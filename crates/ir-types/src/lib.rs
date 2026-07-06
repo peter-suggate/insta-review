@@ -73,6 +73,13 @@ pub struct PipelineConfig {
     pub gop_seconds: f32,
     /// Encoder quality knob, roughly CQP/CRF-like; pipeline-specific mapping.
     pub quality: u32,
+    /// 0 = capture the full frame. Otherwise encode only a square of this
+    /// many pixels centered on the frame (the crosshair) — a large
+    /// convert/encode/memory-bandwidth saving on iGPU boxes. Clamped to the
+    /// frame; the capture itself is still full-frame (WGC has no source
+    /// rect), so this reduces every stage after capture.
+    #[serde(default)]
+    pub center_crop_px: u32,
 }
 
 impl Default for PipelineConfig {
@@ -82,6 +89,7 @@ impl Default for PipelineConfig {
             max_fps: 60,
             gop_seconds: 1.0,
             quality: 23,
+            center_crop_px: 0,
         }
     }
 }

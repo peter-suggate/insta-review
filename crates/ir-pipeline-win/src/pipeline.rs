@@ -186,19 +186,28 @@ impl GraphicsCaptureApiHandler for Handler {
         if self.converter.is_none() {
             let cfg = &self.init.cfg;
             let gop_frames = ((cfg.gop_seconds * cfg.max_fps as f32).round() as u32).max(1);
-            info!(width, height, gop_frames, "windows pipeline: first frame");
-            self.converter = Some(Converter::new(
+            info!(
+                width,
+                height,
+                gop_frames,
+                crop = cfg.center_crop_px,
+                "windows pipeline: first frame"
+            );
+            let converter = Converter::new(
                 &self.device,
                 &self.context,
                 width,
                 height,
+                cfg.center_crop_px,
                 cfg.max_fps,
-            )?);
+            )?;
+            let (out_width, out_height) = converter.dimensions();
+            self.converter = Some(converter);
             let mut encoder = MfEncoder::new(
                 &self.device,
                 self.init.sink.clone(),
-                width & !1,
-                height & !1,
+                out_width,
+                out_height,
                 cfg.max_fps,
                 gop_frames,
                 cfg.quality,
@@ -219,7 +228,7 @@ impl GraphicsCaptureApiHandler for Handler {
         }
 
         let converter = self.converter.as_mut().expect("initialized above");
-        if converter.dimensions() != (width & !1, height & !1) {
+        if converter.input_dimensions() != (width & !1, height & !1) {
             // Resolution changed (mode switch / rotation): restarting the
             // whole pipeline is the engine's job.
             warn!("capture dimensions changed; signaling target lost");

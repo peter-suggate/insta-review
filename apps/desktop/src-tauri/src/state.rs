@@ -24,6 +24,10 @@ pub struct AppSettings {
     pub open_rewind_seconds: f32,
     /// "auto" (windows there, test elsewhere), "windows", or "test".
     pub pipeline: String,
+    /// Encode only a square of this many pixels centered on the screen
+    /// (the crosshair). 0 = full frame. Big convert/encode bandwidth saving
+    /// on iGPU machines.
+    pub capture_crop_px: u32,
     pub gsi_enabled: bool,
     pub gsi_port: u16,
     pub gsi_token: String,
@@ -47,6 +51,7 @@ impl Default for AppSettings {
             max_ring_mib: 512,
             open_rewind_seconds: 1.5,
             pipeline: "auto".into(),
+            capture_crop_px: 0,
             gsi_enabled: true,
             gsi_port: 3585,
             gsi_token: "insta-review".into(),

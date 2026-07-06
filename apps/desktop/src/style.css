@@ -37,6 +37,8 @@ body { display: flex; flex-direction: column; }
   font-variant-numeric: tabular-nums;
 }
 #hud-rate { color: var(--accent); }
+#hud-captured { color: var(--dim); }
+#hud-captured.fresh { color: var(--accent); }
 #hud-flags { color: var(--dim); }
 
 #toast {
@@ -48,6 +50,20 @@ body { display: flex; flex-direction: column; }
 
 #bottom { background: var(--panel); border-top: 1px solid #26262e; }
 #timeline { display: block; width: 100%; height: 64px; cursor: pointer; }
+
+#controls {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px 4px;
+}
+#controls .group { display: flex; gap: 4px; }
+#controls button { min-width: 42px; font-variant-numeric: tabular-nums; }
+#controls button:disabled { opacity: 0.4; cursor: default; }
+#btn-play { min-width: 64px; font-size: 15px; }
+#btn-replay { color: var(--accent); border-color: #2f4a3a; }
+#speeds button.active {
+  background: var(--accent); border-color: var(--accent); color: #0c0c10;
+}
+#speed-label { color: var(--dim); margin-left: auto; }
 #statusbar {
   display: flex; justify-content: space-between;
   padding: 5px 10px; color: var(--dim); font-size: 11.5px;

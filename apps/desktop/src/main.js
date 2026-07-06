@@ -9,6 +9,34 @@ const RATES = [0.1, 0.25, 0.5, 1, 2];
 
 let clipMeta = null;
 let gsiOffsetUs = 0;
+let capturedAtMs = null;
+let openPointUs = 0;
+
+function formatAge(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  return `${Math.floor(m / 60)}h ${m % 60}m ago`;
+}
+
+function updateCapturedHud() {
+  const el = $("hud-captured");
+  if (capturedAtMs == null) {
+    el.textContent = "";
+    el.classList.remove("fresh");
+    return;
+  }
+  const age = Date.now() - capturedAtMs;
+  const clock = new Date(capturedAtMs).toLocaleTimeString([], {
+    hour12: false,
+  });
+  el.textContent = `captured ${clock} · ${formatAge(age)}`;
+  // Fresh clips glow accent so a re-shown stale clip is obviously not new.
+  el.classList.toggle("fresh", age < 15000);
+}
+setInterval(updateCapturedHud, 1000);
 
 const timeline = new Timeline($("timeline"), {
   onSeek: (us) => {
@@ -31,8 +59,45 @@ const player = new Player($("video"), {
     if (player.zoom) flags.push("zoom");
     if (player.stretch) flags.push("4:3→16:9");
     $("hud-flags").textContent = flags.join(" · ");
+    syncControls();
   },
 });
+
+// ---- transport controls ------------------------------------------------
+
+const speedsEl = $("speeds");
+for (const r of RATES) {
+  const b = document.createElement("button");
+  b.dataset.rate = r;
+  b.textContent = `${r}×`;
+  b.disabled = true;
+  b.addEventListener("click", () => player.setRate(r));
+  speedsEl.appendChild(b);
+}
+
+function syncControls() {
+  $("btn-play").textContent = player.playing ? "⏸" : "▶";
+  for (const b of speedsEl.children)
+    b.classList.toggle("active", Number(b.dataset.rate) === player.rate);
+}
+
+// The "go" action: back to the primed point, then play at the chosen rate.
+function replay() {
+  if (!clipMeta) return;
+  player.pause();
+  player
+    .seekToUs(openPointUs)
+    .then(() => player.play())
+    .catch(console.error);
+}
+
+$("btn-replay").addEventListener("click", replay);
+$("btn-play").addEventListener("click", () => player.toggle());
+$("btn-step-back").addEventListener("click", () => player.step(-1));
+$("btn-step-fwd").addEventListener("click", () => player.step(1));
+// Buttons must not steal focus, or Space would re-trigger the last-clicked
+// button instead of acting as the global play/pause shortcut.
+$("controls").addEventListener("mousedown", (e) => e.preventDefault());
 
 function toast(msg, ms = 2500) {
   const el = $("toast");
@@ -45,6 +110,8 @@ function toast(msg, ms = 2500) {
 async function loadClip(payload) {
   clipMeta = payload;
   gsiOffsetUs = payload.gsiOffset * 1e6;
+  capturedAtMs = payload.capturedAtMs ?? null;
+  updateCapturedHud();
   $("waiting").classList.add("hidden");
   $("hud").classList.remove("hidden");
 
@@ -77,8 +144,20 @@ async function loadClip(payload) {
     (payload.meta.trigger_at - payload.openRewind) * 1e6
   );
   await player.seekToUs(openUs);
+  openPointUs = openUs;
+  for (const b of document.querySelectorAll("#controls button"))
+    b.disabled = false;
   player.onStateChange();
-  toast(`clip loaded — ${payload.samples.length} frames`);
+  // Warm the cache past the open point so the first play starts smoothly.
+  player.ensureFrames(player.cur, player.cur + 24).catch(() => {});
+  toast(
+    `clip loaded — ${payload.samples.length} frames` +
+      (capturedAtMs != null
+        ? `, captured ${new Date(capturedAtMs).toLocaleTimeString([], {
+            hour12: false,
+          })}`
+        : "")
+  );
   const decode = player.lastDecodeStats || {};
   invoke("player_status", {
     status:
@@ -230,6 +309,11 @@ document.addEventListener("keydown", (e) => {
     case "5":
       player.setRate(RATES[Number(e.key) - 1]);
       break;
+    case "r":
+    case "R":
+    case "Enter":
+      replay();
+      break;
     case "m":
     case "M": {
       const next = timeline.nextMarkerAfter(player.playheadUs);
@@ -279,6 +363,7 @@ const FIELDS = [
   ["quality", "Quality (lower=better)", "number"],
   ["openRewindSeconds", "Rewind on open (s)", "number"],
   ["pipeline", "Pipeline (auto/windows/test)", "text"],
+  ["captureCropPx", "Capture crop around center (px, 0 = full screen)", "number"],
   ["gsiEnabled", "CS2 GSI markers", "checkbox"],
   ["gsiPort", "GSI port", "number"],
   ["gsiToken", "GSI token", "text"],
@@ -327,7 +412,8 @@ function collectSettings() {
     else out[key] = input.value;
   }
   // Integer fields.
-  for (const k of ["fps", "quality", "gsiPort"]) out[k] = Math.round(out[k]);
+  for (const k of ["fps", "quality", "gsiPort", "captureCropPx"])
+    out[k] = Math.round(out[k]);
   return out;
 }
 

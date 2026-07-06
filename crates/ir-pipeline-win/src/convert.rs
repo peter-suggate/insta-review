@@ -34,6 +34,10 @@ pub struct Converter {
     enumerator: ID3D11VideoProcessorEnumerator,
     outputs: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
     next: usize,
+    /// Captured frame size this converter was built for.
+    in_width: u32,
+    in_height: u32,
+    /// NV12 output size (== input, or the centered crop).
     width: u32,
     height: u32,
 }
@@ -44,10 +48,20 @@ impl Converter {
         context: &ID3D11DeviceContext,
         width: u32,
         height: u32,
+        center_crop_px: u32,
         fps: u32,
     ) -> Result<Self, PipelineError> {
         // NV12 requires even dimensions.
-        let (width, height) = (width & !1, height & !1);
+        let (in_width, in_height) = (width & !1, height & !1);
+        // Output size: the full frame, or a centered square crop.
+        let (width, height) = if center_crop_px > 0 {
+            (
+                center_crop_px.min(in_width) & !1,
+                center_crop_px.min(in_height) & !1,
+            )
+        } else {
+            (in_width, in_height)
+        };
         let video_device: ID3D11VideoDevice = device
             .cast()
             .map_err(|e| err("device has no video interface", e))?;
@@ -61,8 +75,8 @@ impl Converter {
                 Numerator: fps,
                 Denominator: 1,
             },
-            InputWidth: width,
-            InputHeight: height,
+            InputWidth: in_width,
+            InputHeight: in_height,
             OutputFrameRate: DXGI_RATIONAL {
                 Numerator: fps,
                 Denominator: 1,
@@ -94,6 +108,28 @@ impl Converter {
                 vc1.VideoProcessorSetOutputColorSpace1(
                     &processor,
                     DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                );
+            }
+        }
+
+        // Cropping: read only the centered subrect of the source (1:1 pixels,
+        // no scaling — output size equals the rect). Persistent processor
+        // state; applies to every subsequent blt.
+        if (width, height) != (in_width, in_height) {
+            let left = ((in_width - width) / 2) & !1;
+            let top = ((in_height - height) / 2) & !1;
+            let rect = windows::Win32::Foundation::RECT {
+                left: left as i32,
+                top: top as i32,
+                right: (left + width) as i32,
+                bottom: (top + height) as i32,
+            };
+            unsafe {
+                video_context.VideoProcessorSetStreamSourceRect(
+                    &processor,
+                    0,
+                    true,
+                    Some(&rect),
                 );
             }
         }
@@ -146,13 +182,21 @@ impl Converter {
             enumerator,
             outputs,
             next: 0,
+            in_width,
+            in_height,
             width,
             height,
         })
     }
 
+    /// NV12 output size (crop applied).
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Captured frame size this converter was built for.
+    pub fn input_dimensions(&self) -> (u32, u32) {
+        (self.in_width, self.in_height)
     }
 
     /// Convert one BGRA frame into the next pooled NV12 texture.

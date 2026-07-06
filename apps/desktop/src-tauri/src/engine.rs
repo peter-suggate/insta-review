@@ -1,7 +1,7 @@
 //! Engine + GSI lifecycle and the snapshot-on-hotkey path.
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use ir_core::Engine;
@@ -52,6 +52,7 @@ pub fn restart_capture(app: &AppHandle) -> Result<(), String> {
         max_fps: settings.fps,
         gop_seconds: settings.gop_seconds,
         quality: settings.quality,
+        center_crop_px: settings.capture_crop_px,
         ..PipelineConfig::default()
     };
     let retain = Duration::from_secs_f32(settings.window_seconds + settings.gop_seconds.max(1.0));
@@ -124,6 +125,10 @@ pub fn trigger_snapshot(app: &AppHandle) {
         };
         let payload = json!({
             "id": id,
+            "capturedAtMs": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             "meta": clip.meta,
             "codec": {
                 "codecString": codec_string,

@@ -31,6 +31,10 @@ struct PipelineArgs {
     width: u32,
     #[arg(long, default_value_t = 720)]
     height: u32,
+    /// Encode only a square of this many pixels centered on the frame
+    /// (0 = full frame). Windows pipeline only.
+    #[arg(long, default_value_t = 0)]
+    crop: u32,
 }
 
 const fn default_pipeline() -> &'static str {
@@ -142,6 +146,7 @@ fn start_engine(
         max_fps: args.fps,
         gop_seconds: args.gop,
         quality: args.quality,
+        center_crop_px: args.crop,
         ..PipelineConfig::default()
     };
     let retain = Duration::from_secs_f32(window + args.gop.max(1.0));
