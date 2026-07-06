@@ -1,4 +1,4 @@
-import { Player } from "./player.js";
+import { Player, b64ToBytes } from "./player.js";
 import { Timeline } from "./timeline.js";
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
@@ -7,10 +7,21 @@ const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 const RATES = [0.1, 0.25, 0.5, 1, 2];
 
+// Background work (filmstrip) defers to anything the user is doing.
+let lastInteraction = 0;
+for (const ev of ["keydown", "pointerdown", "pointermove", "wheel"])
+  window.addEventListener(ev, () => (lastInteraction = performance.now()), {
+    passive: true,
+    capture: true,
+  });
+
 let clipMeta = null;
 let gsiOffsetUs = 0;
 let capturedAtMs = null;
 let openPointUs = 0;
+let loadedClipId = 0;
+let loadInFlight = false;
+let queuedPayload = null;
 
 function formatAge(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -46,6 +57,8 @@ const timeline = new Timeline($("timeline"), {
 });
 
 const player = new Player($("video"), {
+  onSlow: (msg) =>
+    invoke("player_status", { status: `SLOW ${msg}` }).catch(() => {}),
   onPresent: (idx, us) => {
     timeline.setPlayhead(us);
     $("hud-time").textContent = `${(us / 1e6).toFixed(2)} / ${(
@@ -91,6 +104,33 @@ function replay() {
     .catch(console.error);
 }
 
+// Discard the clip and return to the live capturing view. Capture never
+// stopped; the next hotkey press stages a fresh clip.
+function clearAll() {
+  if (!clipMeta) return;
+  clipMeta = null; // aborts the in-flight filmstrip build too
+  player.reset();
+  const video = $("video");
+  video.getContext("2d").clearRect(0, 0, video.width, video.height);
+  timeline.load({
+    durationUs: 0,
+    markers: [],
+    keyframesUs: [],
+    triggerUs: 0,
+    gsiOffsetUs: 0,
+  });
+  capturedAtMs = null;
+  updateCapturedHud();
+  $("hud").classList.add("hidden");
+  $("waiting").classList.remove("hidden");
+  for (const b of document.querySelectorAll("#controls button")) b.disabled = true;
+  previewFails = 0; // let the live preview resume
+  invoke("clear_clip").catch(() => {});
+  toast("cleared — still capturing");
+}
+
+$("btn-clear").addEventListener("click", clearAll);
+
 $("btn-replay").addEventListener("click", replay);
 $("btn-play").addEventListener("click", () => player.toggle());
 $("btn-step-back").addEventListener("click", () => player.step(-1));
@@ -108,7 +148,15 @@ function toast(msg, ms = 2500) {
 }
 
 async function loadClip(payload) {
+  // Breadcrumbs into the app log: if a load wedges, the last one names
+  // the stage that hung.
+  const mark = (s) =>
+    invoke("player_status", { status: `clip ${payload.id}: ${s}` }).catch(
+      () => {}
+    );
+  mark("load started");
   clipMeta = payload;
+  closePreviewDecoder(); // one decoder session at a time
   gsiOffsetUs = payload.gsiOffset * 1e6;
   capturedAtMs = payload.capturedAtMs ?? null;
   updateCapturedHud();
@@ -119,6 +167,7 @@ async function loadClip(payload) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`fetch samples: ${response.status}`);
   const buffer = await response.arrayBuffer();
+  mark(`fetched ${buffer.byteLength} bytes`);
 
   await player.load({
     codec: payload.codec,
@@ -126,6 +175,19 @@ async function loadClip(payload) {
     buffer,
     stretch43: payload.stretch43,
   });
+  mark("decoder configured");
+  // One-off diagnosis: is hardware decode even on the table here?
+  for (const ha of ["prefer-hardware", "prefer-software"]) {
+    try {
+      const s = await VideoDecoder.isConfigSupported({
+        ...player.decoderConfig,
+        hardwareAcceleration: ha,
+      });
+      mark(`${ha} supported: ${s.supported}`);
+    } catch (e) {
+      mark(`${ha} probe error: ${e.message || e}`);
+    }
+  }
 
   timeline.load({
     durationUs: player.durationUs(),
@@ -137,19 +199,16 @@ async function loadClip(payload) {
     gsiOffsetUs,
   });
 
-  // Open paused, rewound before the trigger (the key is pressed just
-  // after the moment of interest).
-  const openUs = Math.max(
-    0,
-    (payload.meta.trigger_at - payload.openRewind) * 1e6
-  );
-  await player.seekToUs(openUs);
-  openPointUs = openUs;
+  // Open paused at the very start: the clip IS the last moments, so
+  // play-through runs the whole recording up to the hotkey press. The
+  // stream keeps decoding ahead in the background from here.
+  await player.ensureFrame(0);
+  player.present(0);
+  player.playheadUs = 0;
+  openPointUs = 0;
   for (const b of document.querySelectorAll("#controls button"))
     b.disabled = false;
   player.onStateChange();
-  // Warm the cache past the open point so the first play starts smoothly.
-  player.ensureFrames(player.cur, player.cur + 24).catch(() => {});
   toast(
     `clip loaded — ${payload.samples.length} frames` +
       (capturedAtMs != null
@@ -167,7 +226,212 @@ async function loadClip(payload) {
       `(${(player.playheadUs / 1e6).toFixed(2)}s), ${payload.meta.markers.length} markers, ` +
       `cache ${player.cache.size}, decode outputs ${decode.outputs} unmatched ${decode.unmatched}`,
   }).catch(() => {});
+
+  // Filmstrip afterwards; it paints progressively and defers to all
+  // player work, so it never delays interactivity.
+  buildFilmstrip(payload).catch((e) =>
+    invoke("player_status", {
+      status: `filmstrip failed: ${e.message || e}`,
+    }).catch(() => {})
+  );
 }
+
+// Decode one keyframe per timeline slot (nearest to the slot's center)
+// through the player's own decoder/cache — no second decoder session.
+async function buildFilmstrip(payload) {
+  const dpr = window.devicePixelRatio || 1;
+  const stripCanvas = $("timeline");
+  const h = Math.max(1, Math.round(stripCanvas.clientHeight * dpr));
+  const stripW = stripCanvas.clientWidth * dpr;
+  const keys = payload.meta.keyframe_indices;
+  const durationUs = payload.samples[payload.samples.length - 1]?.tUs || 0;
+  if (!keys.length || !durationUs) return;
+
+  let ar = payload.codec.width / payload.codec.height;
+  if (payload.stretch43 && Math.abs(ar - 4 / 3) < 0.05) ar = 16 / 9;
+  const slotW = Math.max(24, Math.round((h / dpr) * ar) * dpr);
+  const count = Math.max(1, Math.min(keys.length, Math.ceil(stripW / slotW)));
+
+  const picks = [];
+  for (let i = 0; i < count; i++) {
+    const target = ((i + 0.5) / count) * durationUs;
+    let best = keys[0];
+    for (const k of keys)
+      if (
+        Math.abs(payload.samples[k].tUs - target) <
+        Math.abs(payload.samples[best].tUs - target)
+      )
+        best = k;
+    picks.push(best);
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const bitmaps = [];
+  const stripT0 = performance.now();
+  for (const keyIdx of picks) {
+    // Strictly lowest priority: never decode while the user is playing,
+    // scrubbing, waiting on a frame, or has touched anything recently.
+    while (
+      player.playing ||
+      player.waiters.size > 0 ||
+      performance.now() - lastInteraction < 500
+    ) {
+      if (clipMeta !== payload) break;
+      await sleep(200);
+    }
+    if (clipMeta !== payload) {
+      // Superseded mid-build; the new clip's filmstrip owns the strip.
+      for (const b of bitmaps) b.close();
+      return;
+    }
+    try {
+      player.holdIdx = keyIdx; // survive eviction until the bitmap is made
+      await player.ensureFrame(keyIdx);
+      const frame = player.cache.get(keyIdx);
+      if (!frame) throw new Error(`keyframe ${keyIdx} not cached`);
+      bitmaps.push(
+        await createImageBitmap(frame, {
+          resizeWidth: slotW,
+          resizeHeight: h,
+        })
+      );
+      player.holdIdx = null;
+    } catch (e) {
+      player.holdIdx = null;
+      invoke("player_status", {
+        status: `filmstrip stopped at ${bitmaps.length}/${picks.length}: ${e.message || e}`,
+      }).catch(() => {});
+      break; // ship what we have
+    }
+    // Paint progressively and yield so queued player work wins the slot.
+    timeline.setThumbnails(bitmaps.slice(), picks.length);
+    await sleep(30);
+  }
+  invoke("player_status", {
+    status: `filmstrip: ${bitmaps.length}/${picks.length} thumbs in ${(
+      performance.now() - stripT0
+    ).toFixed(0)} ms`,
+  }).catch(() => {});
+}
+
+// ---- live preview on the idle screen -----------------------------------
+// While no clip is loaded, poll the ring's newest keyframe (~1 Hz) and
+// decode it into a thumbnail so it's visible that capture is running.
+
+// Persistent preview decoder — decoder init costs ~seconds on some
+// machines, so recreating it every poll is not an option. It only runs
+// while no clip is loaded, so it never competes with the player.
+let previewDec = null;
+let previewCfgKey = "";
+let previewOut = null;
+
+function closePreviewDecoder() {
+  if (previewDec) {
+    try {
+      previewDec.close();
+    } catch {}
+    previewDec = null;
+  }
+  if (previewOut) {
+    previewOut.close();
+    previewOut = null;
+  }
+  previewCfgKey = "";
+}
+
+async function previewDecode(p) {
+  const cfgKey = `${p.codecString}|${p.avccB64}|${p.width}x${p.height}`;
+  if (!previewDec || previewDec.state !== "configured" || previewCfgKey !== cfgKey) {
+    closePreviewDecoder();
+    previewDec = new VideoDecoder({
+      output: (f) => (previewOut ? f.close() : (previewOut = f)),
+      error: () => {}, // surfaced by flush() rejection
+    });
+    previewDec.configure({
+      codec: p.codecString,
+      description: b64ToBytes(p.avccB64),
+      codedWidth: p.width,
+      codedHeight: p.height,
+      optimizeForLatency: true,
+    });
+    previewCfgKey = cfgKey;
+  }
+  previewOut = null;
+  try {
+    previewDec.decode(
+      new EncodedVideoChunk({
+        type: "key",
+        timestamp: 0,
+        data: b64ToBytes(p.dataB64),
+      })
+    );
+    await Promise.race([
+      previewDec.flush(),
+      new Promise((_, rej) =>
+        setTimeout(() => rej(new Error("preview decode timeout")), 3000)
+      ),
+    ]);
+    const frame = previewOut;
+    previewOut = null;
+    if (!frame) throw new Error("keyframe produced no output");
+    return frame;
+  } catch (e) {
+    closePreviewDecoder(); // recreate fresh on the next poll
+    throw e;
+  }
+}
+
+let previewBusy = false;
+let previewFails = 0;
+
+async function pollPreview() {
+  // Only while the waiting overlay is up; once a clip loads it takes over.
+  // Back off for good after repeated failures rather than churning the
+  // decoder pool every second.
+  if (clipMeta || loadInFlight || document.hidden || previewBusy) return;
+  if (previewFails >= 3) return;
+  previewBusy = true;
+  try {
+    const p = await invoke("preview_frame");
+    if (clipMeta || loadInFlight) return; // clip landed while fetching
+    if (!p) {
+      $("preview").classList.add("hidden");
+      return;
+    }
+    const canvas = $("preview-canvas");
+    // Thumbnail-size backing store; drawImage scales the frame down.
+    const w = Math.round(440 * (window.devicePixelRatio || 1));
+    const h = Math.round((w * p.height) / p.width);
+    const frame = await previewDecode(p);
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(frame, 0, 0, w, h);
+    frame.close();
+    previewFails = 0;
+    $("preview-status").textContent =
+      `live — last ${p.spanSeconds.toFixed(0)}s buffered`;
+    $("preview").classList.remove("hidden");
+  } catch (e) {
+    previewFails++;
+    invoke("player_status", {
+      status: `preview decode failed (${previewFails}): ${e.message || e}`,
+    }).catch(() => {});
+    if (previewFails >= 3) $("preview").classList.add("hidden");
+  } finally {
+    previewBusy = false;
+  }
+}
+setInterval(pollPreview, 1000);
+pollPreview();
+
+// Personalize the idle hint with the real hotkey + window.
+invoke("get_settings")
+  .then((s) => {
+    $("waiting-msg").textContent =
+      `capturing — press ${s.hotkey.toUpperCase()} in game ` +
+      `to review the last ${Math.round(s.windowSeconds)}s`;
+  })
+  .catch(() => {});
 
 // ---- self-test (test pattern clips only; IR_AUTOTEST=1) ---------------
 // Reads the burned-in frame counter back from decoded pixels — the same
@@ -211,13 +475,18 @@ function readCounter(frame) {
 async function selfTest() {
   const report = (s) => invoke("player_status", { status: s }).catch(() => {});
   try {
+    const tRead = performance.now();
     const c0 = readCounter(player.currentFrame());
+    const readMs = performance.now() - tRead;
     const t0 = performance.now();
     await player.step(1);
+    const step1Ms = performance.now() - t0;
     const c1 = readCounter(player.currentFrame());
+    const t1 = performance.now();
     await player.step(1);
+    const step2Ms = performance.now() - t1;
     const c2 = readCounter(player.currentFrame());
-    const stepMs = (performance.now() - t0) / 2;
+    const stepMs = (step1Ms + step2Ms) / 2;
     await player.step(-1);
     const c3 = readCounter(player.currentFrame());
     const fwdOk = c1 === c0 + 1 && c2 === c0 + 2;
@@ -230,29 +499,72 @@ async function selfTest() {
     player.pause();
     const played = player.cur - before;
 
+    const passes = player.passLog || [];
+    const chunks = passes.reduce((a, p) => a + p.n, 0);
+    const passMs = passes.reduce((a, p) => a + p.ms, 0);
+    const passDetail = passes
+      .map((p) => `${p.n}:${p.ms.toFixed(0)}`)
+      .join(" ");
     report(
       `SELFTEST counters ${c0}→${c1}→${c2}, back→${c3}: ` +
         `fwd ${fwdOk ? "OK" : "FAIL"}, back ${backOk ? "OK" : "FAIL"}, ` +
-        `step ${stepMs.toFixed(1)} ms avg, played ${played} frames in 1.2 s`
+        `steps ${step1Ms.toFixed(0)}/${step2Ms.toFixed(0)} ms (pixel read ${readMs.toFixed(0)} ms), ` +
+        `played ${played} frames in 1.2 s, ` +
+        `decode ${chunks} chunks in ${passMs.toFixed(0)} ms across ${passes.length} passes ` +
+        `(${passMs > 0 ? ((chunks * 1000) / passMs).toFixed(0) : "?"} chunks/s) ` +
+        `[chunks:ms per pass — ${passDetail}]`
     );
+    void stepMs;
   } catch (e) {
     report(`SELFTEST ERROR: ${e.message || e}`);
   }
 }
 
-listen("clip-ready", (event) => {
-  loadClip(event.payload)
-    .then(() => {
-      if (event.payload.autotest) return selfTest();
-    })
-    .catch((e) => {
+// Clip loads are serialized and newest-wins: clip-ready events can arrive
+// late or bunched (WebView2 suspends throttled/minimized windows), and a
+// concurrent double-load leaves the player on a stale frame.
+async function loadClipLatest(payload) {
+  if (payload.id <= loadedClipId) return;
+  if (loadInFlight) {
+    if (!queuedPayload || payload.id > queuedPayload.id) queuedPayload = payload;
+    return;
+  }
+  loadInFlight = true;
+  try {
+    await loadClip(payload);
+    loadedClipId = payload.id;
+    if (payload.autotest) selfTest();
+  } catch (e) {
     console.error(e);
     toast(`failed to load clip: ${e.message || e}`, 6000);
     invoke("player_status", {
       status: `ERROR loading clip: ${e.message || e}`,
     }).catch(() => {});
-  });
+  } finally {
+    loadInFlight = false;
+    if (queuedPayload) {
+      const next = queuedPayload;
+      queuedPayload = null;
+      loadClipLatest(next);
+    }
+  }
+}
+
+listen("clip-ready", (event) => loadClipLatest(event.payload));
+
+// Catch-up: ask for the staged clip whenever we (re)gain visibility, in
+// case clip-ready fired while the webview was suspended.
+async function syncCurrentClip() {
+  try {
+    const payload = await invoke("current_clip");
+    if (payload) await loadClipLatest(payload);
+  } catch {}
+}
+window.addEventListener("focus", syncCurrentClip);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) syncCurrentClip();
 });
+syncCurrentClip();
 
 // ---- keyboard ----------------------------------------------------------
 
@@ -337,6 +649,10 @@ document.addEventListener("keydown", (e) => {
         .then((path) => toast(`saved ${path}`))
         .catch((e) => toast(`save failed: ${e}`, 5000));
       break;
+    case "c":
+    case "C":
+      clearAll();
+      break;
     case "g":
     case "G":
       toggleSettings(true);
@@ -361,7 +677,6 @@ const FIELDS = [
   ["fps", "Capture FPS", "number"],
   ["gopSeconds", "GOP (s)", "number"],
   ["quality", "Quality (lower=better)", "number"],
-  ["openRewindSeconds", "Rewind on open (s)", "number"],
   ["pipeline", "Pipeline (auto/windows/test)", "text"],
   ["captureCropPx", "Capture crop around center (px, 0 = full screen)", "number"],
   ["gsiEnabled", "CS2 GSI markers", "checkbox"],

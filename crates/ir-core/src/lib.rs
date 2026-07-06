@@ -10,7 +10,7 @@ pub mod ring;
 pub mod snapshot;
 
 pub use clock::CaptureClock;
-pub use engine::{Engine, EngineCommand, EngineHandle, MarkerSender};
+pub use engine::{Engine, EngineCommand, EngineHandle, MarkerSender, PreviewFrame};
 pub use markers::MarkerLog;
 pub use pipeline::{CapturePipeline, PacketSink};
 pub use ring::{ReplayRing, RingSnapshot, RingStats};

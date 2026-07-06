@@ -108,6 +108,51 @@ pub fn capture_stats(state: State<AppState>) -> Option<serde_json::Value> {
     })
 }
 
+/// Drop the staged clip (frees the blob; replay:// and current_clip go
+/// empty). The review window returns to the live capturing view, which
+/// needs capture running again if reviewing had paused it.
+#[tauri::command]
+pub fn clear_clip(app: AppHandle, state: State<AppState>) {
+    *state.clip.lock().unwrap() = None;
+    let running = state.engine.lock().unwrap().is_some();
+    if !running {
+        if let Err(e) = crate::engine::restart_capture(&app) {
+            tracing::warn!("capture failed to resume after clear: {e}");
+        }
+    }
+}
+
+/// The staged clip's payload — catch-up path for a webview that missed the
+/// clip-ready event while minimized/throttled (WebView2 suspends those).
+#[tauri::command]
+pub fn current_clip(state: State<AppState>) -> Option<serde_json::Value> {
+    state
+        .clip
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.payload.clone())
+}
+
+/// Latest keyframe from the live ring, base64-encoded for the idle-screen
+/// preview thumbnail. None until capture has produced a keyframe.
+#[tauri::command]
+pub fn preview_frame(state: State<AppState>) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    let engine = state.engine.lock().unwrap();
+    let preview = engine.as_ref()?.preview()?;
+    let ir_types::Codec::H264 { avcc } = &preview.codec.codec;
+    let b64 = &base64::engine::general_purpose::STANDARD;
+    Some(serde_json::json!({
+        "codecString": crate::engine::codec_string(avcc),
+        "avccB64": b64.encode(avcc),
+        "width": preview.codec.width,
+        "height": preview.codec.height,
+        "dataB64": b64.encode(&preview.keyframe.data),
+        "spanSeconds": preview.span.as_secs_f32(),
+    }))
+}
+
 /// Where the GSI cfg would be written (for the consent prompt).
 #[tauri::command]
 pub fn gsi_cfg_target() -> Result<String, String> {

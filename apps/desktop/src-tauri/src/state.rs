@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64};
 use std::sync::Mutex;
 
 use ir_core::{Clip, EngineHandle};
@@ -96,6 +96,9 @@ pub struct CurrentClip {
     pub clip: Clip,
     /// All AVCC sample bytes, concatenated (served via replay://).
     pub blob: Vec<u8>,
+    /// The clip-ready payload, re-served via `current_clip` so a webview
+    /// that missed the event (minimized/throttled) can catch up.
+    pub payload: serde_json::Value,
 }
 
 #[derive(Default)]
@@ -106,6 +109,10 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub settings_path: Mutex<PathBuf>,
     pub clip_counter: AtomicU32,
+    /// Millis-since-epoch of the last accepted trigger (hotkey debounce).
+    pub last_trigger_ms: AtomicU64,
+    /// A debounced focus-change check is already scheduled (single-flight).
+    pub focus_check_pending: AtomicBool,
     /// Foreground window (the game) at trigger time; 0 = none.
     /// Read on Windows only (focus restore).
     #[allow(dead_code)]

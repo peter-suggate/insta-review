@@ -10,6 +10,10 @@
     <canvas id="video"></canvas>
     <div id="waiting">
       <div class="big">insta-review</div>
+      <div id="preview" class="hidden">
+        <canvas id="preview-canvas"></canvas>
+        <div id="preview-label"><span class="dot"></span><span id="preview-status">live</span></div>
+      </div>
       <div id="waiting-msg">capturing — press the hotkey in game to review the last moments</div>
     </div>
     <div id="hud" class="hidden">
@@ -33,11 +37,13 @@
       </div>
       <span id="speed-label">speed</span>
       <div class="group" id="speeds"></div>
+      <button id="btn-clear" title="Discard this clip, back to live capture (C)" disabled>✕ clear</button>
     </div>
     <div id="statusbar">
       <span id="hints">
         R replay · Space play/pause · , . frame step · J K L · ← → ±1s ·
-        1–5 speed · M next marker · Z zoom · A aspect · S save · G settings · Esc close
+        1–5 speed · M next marker · Z zoom · A aspect · S save · C clear ·
+        G settings · Esc close
       </span>
     </div>
   </div>

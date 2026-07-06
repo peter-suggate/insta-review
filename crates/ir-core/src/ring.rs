@@ -197,6 +197,15 @@ impl ReplayRing {
         }
     }
 
+    /// The most recent keyframe (start of the open GOP, else the newest
+    /// sealed one) — a self-contained decodable frame for live preview.
+    pub fn latest_keyframe(&self) -> Option<&EncodedPacket> {
+        self.open
+            .as_ref()
+            .or_else(|| self.sealed.back())
+            .and_then(|g| g.packets().first())
+    }
+
     /// Cheap consistent copy of the last `window` of footage (whole GOPs,
     /// front-aligned to a keyframe). Returns `None` before the pipeline has
     /// configured the stream or produced a keyframe.

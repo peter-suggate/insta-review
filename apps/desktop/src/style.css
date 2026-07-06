@@ -29,6 +29,26 @@ body { display: flex; flex-direction: column; }
 }
 #waiting .big { font-size: 22px; letter-spacing: 1px; color: var(--text); }
 
+#preview { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+#preview-canvas {
+  width: 440px; max-width: 70vw;
+  border: 1px solid #2c2c36; border-radius: 8px;
+  background: #0a0a0e;
+}
+#preview-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--dim);
+}
+#preview-label .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #e05555;
+  animation: preview-pulse 2s ease-in-out infinite;
+}
+@keyframes preview-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 #hud {
   position: absolute; top: 10px; left: 12px;
   display: flex; gap: 14px;
@@ -49,7 +69,7 @@ body { display: flex; flex-direction: column; }
 }
 
 #bottom { background: var(--panel); border-top: 1px solid #26262e; }
-#timeline { display: block; width: 100%; height: 64px; cursor: pointer; }
+#timeline { display: block; width: 100%; height: 76px; cursor: pointer; }
 
 #controls {
   display: flex; align-items: center; gap: 12px;

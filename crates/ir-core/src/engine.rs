@@ -2,7 +2,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, unbounded, Sender};
-use ir_types::{Marker, PipelineConfig, PipelineError, PipelineEvent};
+use ir_types::{CodecConfig, EncodedPacket, Marker, PipelineConfig, PipelineError, PipelineEvent};
 use tracing::{info, warn};
 
 use crate::clock::CaptureClock;
@@ -24,7 +24,20 @@ pub enum EngineCommand {
     Stats {
         reply: Sender<RingStats>,
     },
+    /// Latest keyframe + codec for the live preview thumbnail.
+    Preview {
+        reply: Sender<Option<PreviewFrame>>,
+    },
     Stop,
+}
+
+/// A single decodable frame from the live ring, for UI preview.
+#[derive(Debug, Clone)]
+pub struct PreviewFrame {
+    pub codec: CodecConfig,
+    pub keyframe: EncodedPacket,
+    /// Footage currently covered by the ring.
+    pub span: Duration,
 }
 
 /// Handle for talking to a running engine from other threads (hotkey
@@ -81,6 +94,14 @@ impl EngineHandle {
         let (reply, rx) = bounded(1);
         self.cmd_tx.send(EngineCommand::Stats { reply }).ok()?;
         rx.recv().ok()
+    }
+
+    /// Latest keyframe from the live ring. `None` until the pipeline has
+    /// configured and produced a keyframe.
+    pub fn preview(&self) -> Option<PreviewFrame> {
+        let (reply, rx) = bounded(1);
+        self.cmd_tx.send(EngineCommand::Preview { reply }).ok()?;
+        rx.recv().ok().flatten()
     }
 
     pub fn stop(mut self) {
@@ -140,6 +161,16 @@ impl Engine {
                             Ok(EngineCommand::AddMarker(m)) => markers.push(m),
                             Ok(EngineCommand::Stats { reply }) => {
                                 let _ = reply.send(ring.stats());
+                            }
+                            Ok(EngineCommand::Preview { reply }) => {
+                                let frame = ring.codec().cloned().zip(ring.latest_keyframe().cloned()).map(
+                                    |(codec, keyframe)| PreviewFrame {
+                                        codec,
+                                        keyframe,
+                                        span: ring.span(),
+                                    },
+                                );
+                                let _ = reply.send(frame);
                             }
                             Ok(EngineCommand::Stop) | Err(_) => break,
                         },

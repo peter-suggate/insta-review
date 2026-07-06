@@ -93,6 +93,9 @@ fn main() {
             commands::set_settings,
             commands::restart_capture,
             commands::capture_stats,
+            commands::preview_frame,
+            commands::current_clip,
+            commands::clear_clip,
             commands::gsi_cfg_target,
             commands::install_gsi_cfg,
             commands::quit_app,
@@ -182,11 +185,48 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the review window minimizes it to the taskbar; the
-            // app keeps capturing.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.minimize();
+            match event {
+                // Closing the review window minimizes it to the taskbar; the
+                // app keeps capturing.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.minimize();
+                }
+                // Capture pauses exactly while the user reviews a clip:
+                // encoding fights the player's decoder for the GPU video
+                // engine. Any way of leaving (Esc, X, alt-tab) resumes.
+                // Debounced off-thread: focus flaps while capture restarts,
+                // so act on whatever is still true half a second later.
+                tauri::WindowEvent::Focused(_) => {
+                    use std::sync::atomic::Ordering;
+                    // Single-flight: focus events arrive in bursts.
+                    if window
+                        .app_handle()
+                        .state::<AppState>()
+                        .focus_check_pending
+                        .swap(true, Ordering::SeqCst)
+                    {
+                        return;
+                    }
+                    let window = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let app = window.app_handle();
+                        let state = app.state::<AppState>();
+                        state.focus_check_pending.store(false, Ordering::SeqCst);
+                        let focused = window.is_focused().unwrap_or(false);
+                        let has_clip = state.clip.lock().unwrap().is_some();
+                        let running = state.engine.lock().unwrap().is_some();
+                        if focused && has_clip && running {
+                            engine::stop_capture(app);
+                        } else if !focused && !running {
+                            if let Err(e) = engine::restart_capture(app) {
+                                warn!("capture failed to resume: {e}");
+                            }
+                        }
+                    });
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

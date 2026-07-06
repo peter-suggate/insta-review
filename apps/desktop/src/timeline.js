@@ -21,6 +21,7 @@ export class Timeline {
     this.keyframesUs = [];
     this.triggerUs = 0;
     this.gsiOffsetUs = 0;
+    this.thumbs = null; // filmstrip ImageBitmaps, left to right
 
     const seekFromEvent = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -45,6 +46,14 @@ export class Timeline {
     this.keyframesUs = keyframesUs;
     this.triggerUs = triggerUs;
     this.gsiOffsetUs = gsiOffsetUs;
+    this.thumbs = null; // stale filmstrip belongs to the previous clip
+    this.draw();
+  }
+
+  // Progressive: list may be shorter than total while the filmstrip is
+  // still decoding; slots stay sized for the final count.
+  setThumbnails(list, total) {
+    this.thumbs = list && list.length ? { list, total: total || list.length } : null;
     this.draw();
   }
 
@@ -79,6 +88,17 @@ export class Timeline {
     ctx.fillStyle = "#131318";
     ctx.fillRect(0, 0, w, h);
 
+    // Filmstrip: thumbnails stretched to tile the full width, dimmed so
+    // the overlays (playhead, markers) stay readable.
+    if (this.thumbs) {
+      const slotW = w / this.thumbs.total;
+      this.thumbs.list.forEach((bitmap, i) => {
+        if (bitmap) ctx.drawImage(bitmap, i * slotW, 0, slotW, h);
+      });
+      ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+      ctx.fillRect(0, 0, w, h);
+    }
+
     // Keyframe ticks along the bottom.
     ctx.fillStyle = "#2c2c36";
     for (const kUs of this.keyframesUs) {
@@ -103,16 +123,25 @@ export class Timeline {
       ctx.fillText(style.label, x(t), 13 * dpr);
     }
 
-    // Trigger line.
-    ctx.fillStyle = "#e8e8ec";
+    // Trigger line (kept dim: it's context, not the thing you drag).
+    ctx.fillStyle = "#8a8a94";
     ctx.fillRect(x(this.triggerUs) - dpr, 0, 2 * dpr, h);
     ctx.font = `${10 * dpr}px system-ui`;
     ctx.textAlign = "left";
-    ctx.fillStyle = "#8a8a94";
     ctx.fillText("hotkey", x(this.triggerUs) + 4 * dpr, h - 4 * dpr);
 
-    // Playhead.
-    ctx.fillStyle = "#50c878";
-    ctx.fillRect(x(this.playheadUs) - dpr, 0, 2 * dpr, h);
+    // Playhead: white with a knob so it can't be confused with the green
+    // kill markers, plus a dark outline to survive bright thumbnails.
+    const px = x(this.playheadUs);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(px - 2 * dpr, 0, 4 * dpr, h);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(px - dpr, 0, 2 * dpr, h);
+    ctx.beginPath();
+    ctx.moveTo(px - 5 * dpr, 0);
+    ctx.lineTo(px + 5 * dpr, 0);
+    ctx.lineTo(px, 7 * dpr);
+    ctx.closePath();
+    ctx.fill();
   }
 }
