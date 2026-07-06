@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use ir_core::PacketSink;
 use ir_mux::h264;
 use ir_types::{Codec, CodecConfig, ColorInfo, EncodedPacket, PipelineError};
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 use windows::core::Interface;
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Multithread, ID3D11Texture2D};
@@ -157,7 +157,24 @@ impl MfEncoder {
             let result = (*activates)
                 .as_ref()
                 .ok_or_else(|| PipelineError::Encode("null MFT activate".into()))
-                .and_then(|first| first.ActivateObject().map_err(|e| err("ActivateObject", e)));
+                .and_then(|first| {
+                    let mut name = windows::core::PWSTR::null();
+                    let mut len = 0u32;
+                    if first
+                        .GetAllocatedString(
+                            &windows::Win32::Media::MediaFoundation::MFT_FRIENDLY_NAME_Attribute,
+                            &mut name,
+                            &mut len,
+                        )
+                        .is_ok()
+                    {
+                        let s =
+                            String::from_utf16_lossy(std::slice::from_raw_parts(name.0, len as usize));
+                        info!(encoder = %s, candidates = count, "hardware H.264 encoder");
+                        windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const _));
+                    }
+                    first.ActivateObject().map_err(|e| err("ActivateObject", e))
+                });
             // Release every enumerated activate (take ownership so Drop
             // runs), then free the COM task-memory array itself.
             for i in 0..count as usize {
@@ -354,6 +371,7 @@ impl MfEncoder {
     }
 
     fn submit(&mut self, job: EncodeJob) -> Result<(), PipelineError> {
+        trace!(pts_ms = job.pts.as_millis() as u64, "submit frame to MFT");
         if job.force_keyframe {
             unsafe {
                 let _ = self
@@ -412,6 +430,11 @@ impl MfEncoder {
             data
         };
 
+        trace!(
+            out_pts_ms = pts_100ns / 10_000,
+            len = bytes.len(),
+            "MFT output sample"
+        );
         self.emit(pts_100ns, &bytes);
         Ok(())
     }

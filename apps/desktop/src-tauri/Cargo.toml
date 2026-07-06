@@ -24,6 +24,7 @@ ir-gsi.workspace = true
 ir-pipeline-test = { workspace = true, optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 serde.workspace = true
 serde_json.workspace = true
 base64 = "0.22"

@@ -63,6 +63,15 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        // Must be the first plugin: a second launch hands off to the running
+        // instance (we surface its review window) and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            info!("second launch detected; surfacing the review window");
+            if let Some(window) = app.get_webview_window("review") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {

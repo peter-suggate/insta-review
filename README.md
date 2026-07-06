@@ -16,16 +16,28 @@ Integration (a config file; the game POSTs JSON to a local port).
 - **M0 done** — engine core: GOP-structured encoded ring buffer, in-memory
   MP4 muxer, synthetic test pipeline with burned-in frame counters
   (ground truth for frame accuracy), headless CLI.
-- **M2 in test** — Windows pipeline (WGC → D3D11 VideoProcessor → H.264 MFT),
-  global hotkey, GSI markers. Compiles clean for `x86_64-pc-windows-msvc`;
-  needs first run on a real Windows box (below).
+- **M2 verified on Windows** — Windows pipeline (WGC → D3D11 VideoProcessor →
+  H.264 MFT) confirmed on a Win11 hybrid-GPU laptop (Radeon 780M display
+  adapter + RTX 5060): capture at 2560×1440, AMD AMF hardware encoder
+  selected, BT.709-limited tagging correct, pts strictly monotonic, MP4s
+  validated with ffprobe. GSI listener + marker derivation verified
+  end-to-end against `gsi-sim` (kill/death/damage/bomb/round markers with
+  correct clip-relative times; bad-token payloads dropped). Hotkey
+  registration + trigger→snapshot→sidecar plumbing verified (see note on
+  keystroke delivery below).
 - **M3+M4 done** — the desktop app (`apps/desktop`): warm hidden review
   window, hotkey → frame-accurate WebCodecs player in <100 ms, timeline
   with GSI kill/death/round/bomb markers, 4:3-stretch aspect override +
   crosshair zoom, settings drawer, one-click GSI config installer.
   Verified end-to-end on macOS with the test pipeline (automated self-test
   reads the burned-in frame counters back from decoded pixels: stepping
-  advances exactly 1 frame, backstep exact, ~25 ms/step).
+  advances exactly 1 frame, backstep exact, ~25 ms/step). Also verified on
+  Windows 11: same self-test passes (steps exact) and the real WGC→AMF
+  pipeline feeds the WebCodecs player (2560×1440 High-profile clip decodes,
+  opens paused at trigger−rewind). Step/playback timing couldn't be measured
+  fairly there — the test session was locked, so the hidden WebView2 window
+  ran under Chromium's ~100 ms occluded-timer throttle; needs one visible-
+  session run for real numbers.
 - Post-v1: audio track (WASAPI loopback — needs the Windows box), pipeline
   auto-restart on display-mode change, packaging/installer polish.
 
@@ -118,8 +130,17 @@ the GPU's *Video Encode* engine, not 3D.
 
 - `no hardware H.264 encoder MFT found` → driver issue; check NVIDIA driver
   is current.
+- `RegisterHotKey failed (hotkey already in use?)` → another app owns that
+  combo (on the test box something already holds Ctrl+Alt+R); pick another
+  with `--hotkey`, e.g. `--hotkey ctrl+alt+f9`.
 - Hotkey doesn't fire in-game → note whether it works on the desktop; we
-  have a `WH_KEYBOARD_LL` fallback planned.
+  have a `WH_KEYBOARD_LL` fallback planned. (Also: Windows only generates
+  WM_HOTKEY while some window is foreground and pumping messages — on a
+  locked/empty desktop no hotkey fires system-wide.)
+- Very few frames captured → WGC only delivers frames when the screen
+  changes; a static desktop produces almost nothing. In-game this is a
+  non-issue (every frame redraws), but a clip triggered while sitting in a
+  static menu can be sparse. A keepalive re-encode is a known TODO.
 - Washed-out or tinted colors → capture a screenshot of the color bars via
   `--pipeline test` for comparison; color-space fix goes in the converter.
 - Anything else: run with `RUST_LOG=debug` and save the output.
