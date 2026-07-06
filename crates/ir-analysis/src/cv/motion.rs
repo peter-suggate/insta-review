@@ -43,7 +43,7 @@ pub struct MovementInterval {
 
 /// A burst of shots inferred from GSI ammo decrements. Timing is coarse:
 /// the decrement happened somewhere in `(t - uncertainty_s, t]`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShotEvent {
     pub t: f64,

@@ -1,0 +1,13 @@
+[package]
+name = "ir-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CS2 demo-file enrichment: tick-exact shot/death truth aligned onto clip time"
+
+[dependencies]
+source2-demo = { version = "0.5.7", default-features = false, features = ["cs2"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

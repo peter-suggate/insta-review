@@ -9,6 +9,7 @@ members = [
     "crates/ir-gsi",
     "crates/ir-winutil",
     "crates/ir-analysis",
+    "crates/ir-demo",
     "crates/ir-cli",
     "apps/desktop/src-tauri",
 ]
@@ -27,6 +28,7 @@ ir-pipeline-win = { path = "crates/ir-pipeline-win" }
 ir-gsi = { path = "crates/ir-gsi" }
 ir-winutil = { path = "crates/ir-winutil" }
 ir-analysis = { path = "crates/ir-analysis" }
+ir-demo = { path = "crates/ir-demo" }
 
 bytes = "1"
 crossbeam-channel = "0.5"

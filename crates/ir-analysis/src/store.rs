@@ -165,6 +165,32 @@ pub fn write_text(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
     std::fs::write(dir.join(name), text)
 }
 
+/// Tick-exact shot events from a demo-enrichment sidecar
+/// (`<clip>.demo.json`, written by `ir-cli demo-enrich`), or None when
+/// absent/unreadable. Uncertainty = one 64-tick interval.
+pub fn load_demo_shots(clip_mp4: &Path) -> Option<Vec<crate::cv::motion::ShotEvent>> {
+    let text = std::fs::read_to_string(clip_mp4.with_extension("demo.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let shots = v.get("shots")?.as_array()?;
+    Some(
+        shots
+            .iter()
+            .filter_map(|s| {
+                Some(crate::cv::motion::ShotEvent {
+                    t: s.get("t")?.as_f64()?,
+                    count: 1,
+                    uncertainty_s: 1.0 / 64.0,
+                    weapon: s
+                        .get("weapon")
+                        .and_then(|w| w.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Frame file name for a given sample timestamp: `f_009200ms.jpg`.
 pub fn frame_file_name(t_us: u64) -> String {
     format!("f_{:06}ms.jpg", t_us / 1000)
@@ -335,6 +361,25 @@ mod tests {
         assert_eq!(std::fs::read(found).unwrap(), b"new");
         assert!(find_analysis_frame(&mp4, "kill_1ms", "../report.json").is_none());
         assert!(find_analysis_frame(&mp4, "kill_1ms", "f.png").is_none());
+    }
+
+    #[test]
+    fn demo_shots_load_from_enrichment_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp4 = tmp.path().join("clip_1_001.mp4");
+        assert!(load_demo_shots(&mp4).is_none());
+        std::fs::write(
+            tmp.path().join("clip_1_001.demo.json"),
+            r#"{"schemaVersion":1,"shots":[
+                {"t":1.5,"weapon":"weapon_ak47"},
+                {"t":9.2,"weapon":"weapon_ak47"}]}"#,
+        )
+        .unwrap();
+        let shots = load_demo_shots(&mp4).unwrap();
+        assert_eq!(shots.len(), 2);
+        assert!((shots[1].t - 9.2).abs() < 1e-9);
+        assert!(shots[0].uncertainty_s < 0.02);
+        assert_eq!(shots[0].weapon, "weapon_ak47");
     }
 
     #[test]

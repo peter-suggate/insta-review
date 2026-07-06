@@ -85,6 +85,22 @@ enum Command {
         #[arg(long)]
         print_gsi_cfg: bool,
     },
+    /// Enrich a saved clip with tick-exact truth from a CS2 demo file:
+    /// aligns the demo onto the clip via its kill/death markers (which
+    /// also identifies the local player) and writes `<clip>.demo.json`
+    /// with the local player's weapon_fire times on the clip clock.
+    /// Analysis picks the file up automatically.
+    DemoEnrich {
+        /// The saved clip's mp4 (its .json sidecar must sit next to it).
+        #[arg(long)]
+        clip: PathBuf,
+        /// The match's .dem file (downloaded from CS2 match history).
+        #[arg(long)]
+        demo: PathBuf,
+        /// Marker-to-demo-event match tolerance, seconds (GSI latency).
+        #[arg(long, default_value_t = 0.7)]
+        tolerance: f64,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,6 +134,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gsi_token,
             print_gsi_cfg,
         ),
+        Command::DemoEnrich {
+            clip,
+            demo,
+            tolerance,
+        } => demo_enrich(&clip, &demo, tolerance),
     }
 }
 
@@ -315,5 +336,75 @@ fn snapshot_on_key(
 
     print_stats(&handle);
     handle.stop();
+    Ok(())
+}
+
+use tracing::info;
+
+/// `demo-enrich`: align a CS2 demo onto a saved clip and write the
+/// tick-exact shot enrichment sidecar.
+fn demo_enrich(
+    clip: &std::path::Path,
+    demo: &std::path::Path,
+    tolerance: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sidecar = clip.with_extension("json");
+    let meta: ir_types::ClipMeta = serde_json::from_str(&std::fs::read_to_string(&sidecar)?)?;
+    let clip_kills: Vec<f64> = meta
+        .markers
+        .iter()
+        .filter(|m| matches!(m.kind, ir_types::MarkerKind::Kill { .. }))
+        .map(|m| m.at)
+        .collect();
+    let clip_deaths: Vec<f64> = meta
+        .markers
+        .iter()
+        .filter(|m| matches!(m.kind, ir_types::MarkerKind::Death))
+        .map(|m| m.at)
+        .collect();
+    if clip_kills.is_empty() && clip_deaths.is_empty() {
+        return Err("clip has no kill/death markers to align against".into());
+    }
+
+    info!(demo = %demo.display(), "parsing demo (this reads the whole file)…");
+    let events = ir_demo::extract_events(demo, &["player_death", "weapon_fire"])?;
+    let deaths: Vec<ir_demo::RawEvent> = events
+        .iter()
+        .filter(|e| e.name == "player_death")
+        .cloned()
+        .collect();
+    let fires: Vec<ir_demo::RawEvent> = events
+        .into_iter()
+        .filter(|e| e.name == "weapon_fire")
+        .collect();
+    info!(deaths = deaths.len(), fires = fires.len(), "demo events extracted");
+
+    let alignment = ir_demo::infer_alignment(&deaths, &clip_kills, &clip_deaths, tolerance)
+        .ok_or("could not align demo to clip (wrong demo, or too few matching events)")?;
+    info!(
+        slot = alignment.slot,
+        offset_s = alignment.offset_s,
+        matched = format!("{}/{}", alignment.matched, alignment.total),
+        "aligned"
+    );
+
+    let duration = meta.frame_pts.last().copied().unwrap_or(0.0);
+    let shots = ir_demo::shots_on_clip_clock(&fires, &alignment, duration);
+    let enrichment = ir_demo::DemoEnrichment {
+        schema_version: ir_demo::ENRICHMENT_VERSION,
+        demo_file: demo.display().to_string(),
+        slot: alignment.slot,
+        offset_s: alignment.offset_s,
+        matched_events: alignment.matched,
+        total_events: alignment.total,
+        shots,
+    };
+    let out = clip.with_extension("demo.json");
+    std::fs::write(&out, serde_json::to_string_pretty(&enrichment)?)?;
+    info!(
+        shots = enrichment.shots.len(),
+        out = %out.display(),
+        "enrichment written — analysis will use tick-exact shot times"
+    );
     Ok(())
 }

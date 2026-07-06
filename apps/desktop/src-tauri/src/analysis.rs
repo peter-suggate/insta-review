@@ -467,11 +467,18 @@ async fn run_pipeline(
         0,
     );
     let glyphs = cv::ocr::GlyphSet::load(&prompts_dir.with_file_name("showpos-glyphs.json"));
+    // Demo enrichment (written by `ir-cli demo-enrich`): tick-exact shot
+    // times already on the clip clock.
+    let demo_shots = store::load_demo_shots(clip_mp4);
+    if demo_shots.is_some() {
+        info!("demo enrichment found — tick-exact shot times in use");
+    }
     let cv_report = cv::analyze(
         event,
         &frames,
         &meta.gsi_trace,
         glyphs.as_ref(),
+        demo_shots,
         (meta.width, meta.height),
         settings.stretch_43,
         settings.gsi_offset_seconds as f64,

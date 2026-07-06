@@ -118,6 +118,9 @@ pub struct CvReport {
     pub speed_source: String,
     /// Where flick extraction ran: "showpos" (measured angles) or "flow".
     pub flick_source: String,
+    /// Where shot times came from: "demo" (tick-exact) or "gsi" (ammo
+    /// diffs, coarse).
+    pub shot_source: String,
     /// How many showpos ROI frames were delivered (for self-checks).
     pub showpos_roi_frames: usize,
     /// Integrated optical-flow yaw ÷ GSI view-direction yaw over the same
@@ -135,6 +138,7 @@ pub fn analyze(
     frames: &FrameStore,
     gsi: &[ClipGsiSample],
     glyphs: Option<&ocr::GlyphSet>,
+    demo_shots: Option<Vec<motion::ShotEvent>>,
     clip_dims: (u32, u32),
     stretched43: bool,
     gsi_offset_s: f64,
@@ -170,7 +174,12 @@ pub fn analyze(
 
     let view = gsi_motion::view_trace(gsi, gsi_offset_s);
     let movement = motion::movement_intervals(&flow, gsi, &speed, bracket_s, cfg);
-    let shots = motion::shots_from_gsi(gsi, gsi_offset_s);
+    // Shot source: demo enrichment (tick-exact, pre-aligned) beats GSI
+    // ammo diffs.
+    let (shots, shot_source) = match demo_shots {
+        Some(shots) if !shots.is_empty() => (shots, "demo".to_string()),
+        _ => (motion::shots_from_gsi(gsi, gsi_offset_s), "gsi".to_string()),
+    };
 
     // Flicks from measured showpos angles when they cover the window;
     // optical flow otherwise. Same extractor either way.
@@ -213,6 +222,9 @@ pub fn analyze(
     if !showpos.is_empty() {
         versions.insert("showpos-ocr".to_string(), "1".to_string());
     }
+    if shot_source == "demo" {
+        versions.insert("shots-demo".to_string(), "1".to_string());
+    }
     CvReport {
         calib,
         flow,
@@ -225,6 +237,7 @@ pub fn analyze(
         showpos,
         speed_source,
         flick_source,
+        shot_source,
         showpos_roi_frames: showpos_rois.len(),
         flow_yaw_ratio,
         versions,
@@ -505,7 +518,7 @@ mod tests {
         // the fused verdict must be Moving, from measurement.
         let frames_static: Vec<LumaFrame> = (0..40).map(|i| frame(i * 16_667, 0, 0)).collect();
         let running = gsi((0..9).map(|i| [i as f64 * 25.0, 0.0, 0.0]).collect());
-        let r = analyze(&event(0.4), &store(frames_static), &running, None, FULL, true, 0.0, &cfg());
+        let r = analyze(&event(0.4), &store(frames_static), &running, None, None, FULL, true, 0.0, &cfg());
         assert!(
             r.movement
                 .iter()
@@ -519,7 +532,7 @@ mod tests {
         let frames_parallax: Vec<LumaFrame> =
             (0..40).map(|i| frame(i * 16_667, 0, i as i64 * 3)).collect();
         let standing = gsi(vec![[100.0, 200.0, 0.0]; 9]);
-        let r = analyze(&event(0.4), &store(frames_parallax), &standing, None, FULL, true, 0.0, &cfg());
+        let r = analyze(&event(0.4), &store(frames_parallax), &standing, None, None, FULL, true, 0.0, &cfg());
         assert!(
             !r.movement
                 .iter()
@@ -599,7 +612,7 @@ mod tests {
                 },
             },
         ];
-        let report = analyze(&event(0.8), &store(frames), &gsi, None, FULL, true, 0.0, &cfg());
+        let report = analyze(&event(0.8), &store(frames), &gsi, None, None, FULL, true, 0.0, &cfg());
         assert!(
             report
                 .candidates
@@ -639,7 +652,7 @@ mod tests {
                 },
             },
         ];
-        let cv = analyze(&event(0.8), &store(frames), &gsi, None, FULL, true, 0.0, &cfg());
+        let cv = analyze(&event(0.8), &store(frames), &gsi, None, None, FULL, true, 0.0, &cfg());
         let report = local_report(&event(0.8), &cv, 7, vec![0.5, 0.8], vec![]);
         assert_eq!(report.provider.provider, "local-cv");
         assert!(report
