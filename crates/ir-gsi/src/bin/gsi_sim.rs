@@ -19,6 +19,7 @@ fn post(addr: &str, body: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn payload(
     token: &str,
     round_phase: &str,
@@ -27,6 +28,7 @@ fn payload(
     kills: i32,
     killhs: u32,
     deaths: i32,
+    ammo: i32,
 ) -> String {
     let bomb = bomb.map_or(String::new(), |b| format!(r#""bomb": "{b}","#));
     format!(
@@ -39,7 +41,12 @@ fn payload(
     "steamid": "76561198000000001",
     "name": "sim-player",
     "state": {{"health": {health}, "armor": 100, "round_kills": {rk}, "round_killhs": {killhs}}},
-    "match_stats": {{"kills": {kills}, "assists": 0, "deaths": {deaths}, "mvps": 0, "score": 0}}
+    "match_stats": {{"kills": {kills}, "assists": 0, "deaths": {deaths}, "mvps": 0, "score": 0}},
+    "weapons": {{
+      "weapon_0": {{"name": "weapon_knife", "state": "holstered", "type": "Knife"}},
+      "weapon_1": {{"name": "weapon_ak47", "state": "active",
+                    "ammo_clip": {ammo}, "ammo_clip_max": 30, "type": "Rifle"}}
+    }}
   }}
 }}"#,
         rk = kills.max(0)
@@ -51,28 +58,32 @@ fn main() {
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:3585".into());
     let token = args.next().unwrap_or_else(|| "dev".into());
 
-    // (delay before sending [ms], phase, bomb, health, kills, killhs, deaths)
-    type Step = (u64, &'static str, Option<&'static str>, i32, i32, u32, i32);
+    // (delay before sending [ms], phase, bomb, health, kills, killhs,
+    //  deaths, ammo_clip) — ammo decrements simulate bursts between posts.
+    type Step = (u64, &'static str, Option<&'static str>, i32, i32, u32, i32, i32);
     let script: &[Step] = &[
-        (0, "freezetime", None, 100, 0, 0, 0),
-        (800, "live", None, 100, 0, 0, 0),
-        (1500, "live", None, 100, 1, 0, 0), // kill
-        (1200, "live", None, 73, 1, 0, 0),  // took 27 damage
-        (900, "live", None, 73, 2, 1, 0),   // headshot kill
-        (1500, "live", None, 0, 2, 1, 1),   // died
-        (1000, "live", Some("planted"), 100, 2, 1, 1),
-        (2000, "live", Some("exploded"), 100, 2, 1, 1),
-        (700, "over", Some("exploded"), 100, 2, 1, 1),
-        (2000, "freezetime", None, 100, 2, 1, 1),
+        (0, "freezetime", None, 100, 0, 0, 0, 30),
+        (800, "live", None, 100, 0, 0, 0, 30),
+        (700, "live", None, 100, 0, 0, 0, 27),  // 3-shot burst
+        (800, "live", None, 100, 1, 0, 0, 24),  // kill after another burst
+        (1200, "live", None, 73, 1, 0, 0, 24),  // took 27 damage
+        (500, "live", None, 73, 1, 0, 0, 18),   // spraying back
+        (400, "live", None, 73, 2, 1, 0, 15),   // headshot kill
+        (1500, "live", None, 0, 2, 1, 1, 15),   // died
+        (800, "live", None, 100, 2, 1, 1, 30),  // respawned, fresh mag
+        (1000, "live", Some("planted"), 100, 2, 1, 1, 30),
+        (2000, "live", Some("exploded"), 100, 2, 1, 1, 30),
+        (700, "over", Some("exploded"), 100, 2, 1, 1, 30),
+        (2000, "freezetime", None, 100, 2, 1, 1, 30),
     ];
 
     println!(
         "gsi-sim → {addr} (token {token:?}), {} events",
         script.len()
     );
-    for (delay, phase, bomb, health, kills, killhs, deaths) in script {
+    for (delay, phase, bomb, health, kills, killhs, deaths, ammo) in script {
         std::thread::sleep(std::time::Duration::from_millis(*delay));
-        let body = payload(&token, phase, *bomb, *health, *kills, *killhs, *deaths);
+        let body = payload(&token, phase, *bomb, *health, *kills, *killhs, *deaths, *ammo);
         match post(&addr, &body) {
             Ok(()) => {
                 println!("sent: phase={phase} bomb={bomb:?} hp={health} k={kills} d={deaths}")

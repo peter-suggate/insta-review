@@ -123,10 +123,51 @@ pub enum MarkerKind {
     ShotFired,
 }
 
+/// Instantaneous player state sampled from a GSI payload (~10 Hz).
+/// Continuous state, not events — the analysis layer diffs it (ammo →
+/// shot counts, flashed/smoked → reliability gates).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GsiState {
+    /// Active weapon name ("weapon_ak47"); empty when unknown.
+    #[serde(default)]
+    pub weapon: String,
+    pub ammo_clip: Option<u32>,
+    pub health: Option<u32>,
+    /// 0-255 flash blindness.
+    #[serde(default)]
+    pub flashed: u8,
+    /// 0-255 smoke occlusion.
+    #[serde(default)]
+    pub smoked: u8,
+}
+
+/// A [`GsiState`] stamped against the capture clock (engine side; the
+/// sidecar carries the rebased [`ClipGsiSample`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GsiSample {
+    pub ts: Duration,
+    pub state: GsiState,
+}
+
+/// A [`GsiState`] rebased to clip-relative seconds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipGsiSample {
+    pub at: f64,
+    #[serde(flatten)]
+    pub state: GsiState,
+}
+
+/// Current sidecar schema version. Pre-`gsi_trace` sidecars deserialize
+/// with `meta_version` 0 and an empty trace — still fully readable.
+pub const CLIP_META_VERSION: u32 = 2;
+
 /// Everything the review player needs besides the sample bytes themselves.
 /// Small: crosses the Tauri IPC as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipMeta {
+    /// See [`CLIP_META_VERSION`].
+    #[serde(default)]
+    pub meta_version: u32,
     pub width: u32,
     pub height: u32,
     pub nominal_fps: u32,
@@ -137,6 +178,10 @@ pub struct ClipMeta {
     pub keyframe_indices: Vec<u32>,
     /// Markers rebased to clip-relative seconds.
     pub markers: Vec<ClipMarker>,
+    /// Low-rate GSI state trace (weapon/ammo/health/flash), clip-relative.
+    /// Consumed by analysis; the player ignores it.
+    #[serde(default)]
+    pub gsi_trace: Vec<ClipGsiSample>,
     /// When the hotkey was pressed, clip-relative seconds.
     pub trigger_at: f64,
 }

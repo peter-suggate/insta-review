@@ -54,6 +54,7 @@ export class Timeline {
     this.triggerUs = triggerUs;
     this.gsiOffsetUs = gsiOffsetUs;
     this.thumbs = null; // stale filmstrip belongs to the previous clip
+    this.analysis = null; // traces belong to the previous clip too
     this.draw();
   }
 
@@ -61,6 +62,14 @@ export class Timeline {
   // still decoding; slots stay sized for the final count.
   setThumbnails(list, total) {
     this.thumbs = list && list.length ? { list, total: total || list.length } : null;
+    this.draw();
+  }
+
+  // CV trace from a completed analysis: { flow: [{t, yawDps, moving}] }.
+  // Drawn as a movement-state strip + a view-velocity curve, aligned with
+  // the playhead so scrubbing lines the numbers up with the footage.
+  setAnalysis(trace) {
+    this.analysis = trace;
     this.draw();
   }
 
@@ -150,6 +159,38 @@ export class Timeline {
       ctx.font = `${11 * dpr}px system-ui`;
       ctx.textAlign = "center";
       ctx.fillText(style.label, x(t), 13 * dpr);
+    }
+
+    // CV analysis overlay: movement strip + yaw-velocity curve.
+    if (this.analysis?.flow?.length) {
+      const flow = this.analysis.flow;
+      const stripY = 15 * dpr,
+        stripH = 3 * dpr;
+      const stateColor = {
+        stationary: "#50c87855",
+        moving: "#ffb050cc",
+        unreliable: "#55555588",
+      };
+      for (let i = 0; i < flow.length; i++) {
+        const t0 = i > 0 ? flow[i - 1].t : flow[i].t - 0.017;
+        ctx.fillStyle = stateColor[flow[i].moving] || stateColor.unreliable;
+        const x0 = x(t0 * 1e6);
+        ctx.fillRect(x0, stripY, Math.max(x(flow[i].t * 1e6) - x0, dpr), stripH);
+      }
+      // Yaw velocity curve, centered vertically, clamped scale.
+      const mid = h * 0.55;
+      const amp = h * 0.3;
+      const vmax = Math.max(200, ...flow.map((s) => Math.abs(s.yawDps)));
+      ctx.strokeStyle = "#5090ffaa";
+      ctx.lineWidth = dpr;
+      ctx.beginPath();
+      for (let i = 0; i < flow.length; i++) {
+        const fx = x(flow[i].t * 1e6);
+        const fy = mid - (flow[i].yawDps / vmax) * amp;
+        if (i === 0) ctx.moveTo(fx, fy);
+        else ctx.lineTo(fx, fy);
+      }
+      ctx.stroke();
     }
 
     // Trigger line (kept dim: it's context, not the thing you drag).

@@ -7,6 +7,8 @@
 //! subscriptions), parsing, and run persistence. Nothing here talks to
 //! Tauri, so `ir-cli` can drive the same pipeline headless later.
 
+pub mod config;
+pub mod cv;
 pub mod llm;
 pub mod parse;
 pub mod prompt;
@@ -21,25 +23,45 @@ use types::{EventRef, ExtractionPlan, FrameRequest};
 /// the event. The lead-up matters most; one frame after confirms the result.
 const EVIDENCE_OFFSETS_S: &[f64] = &[-1.5, -1.0, -0.6, -0.35, -0.15, 0.0, 0.35];
 
-/// Choose the frames to extract for an event, snapped to real sample
-/// timestamps (`frame_pts`, clip-relative seconds) and deduplicated.
+/// CV analysis window around the event: enough lead-up to see the peek,
+/// the counter-strafe, and the flick; a little after for the result.
+const CV_BEFORE_S: f64 = 6.0;
+const CV_AFTER_S: f64 = 1.0;
+
+/// Choose the frames to extract for an event: full-res JPEG evidence at
+/// sparse offsets, plus a dense downscaled-luma run over the CV window.
+/// All snapped to real sample timestamps (`frame_pts`) and deduplicated.
 pub fn plan_extraction(event: &EventRef, frame_pts: &[f64]) -> ExtractionPlan {
-    let mut frames: Vec<FrameRequest> = Vec::new();
+    let mut jpeg_ts = Vec::new();
     for off in EVIDENCE_OFFSETS_S {
-        let target = event.at_s + off;
-        let Some(t_us) = nearest_frame_us(frame_pts, target) else {
-            continue;
-        };
-        if frames.iter().any(|f| f.t_us == t_us) {
-            continue;
+        if let Some(t_us) = nearest_frame_us(frame_pts, event.at_s + off) {
+            jpeg_ts.push(t_us);
         }
-        frames.push(FrameRequest {
-            t_us,
-            want_jpeg: true,
-            want_raw: false,
-        });
+    }
+    let mut frames: Vec<FrameRequest> = frame_pts
+        .iter()
+        .filter(|&&t| t >= event.at_s - CV_BEFORE_S && t <= event.at_s + CV_AFTER_S)
+        .map(|&t| {
+            let t_us = (t.max(0.0) * 1_000_000.0).round() as u64;
+            FrameRequest {
+                t_us,
+                want_jpeg: jpeg_ts.contains(&t_us),
+                want_raw: true,
+            }
+        })
+        .collect();
+    // Evidence frames outside the CV window (clip shorter than the window).
+    for t_us in jpeg_ts {
+        if !frames.iter().any(|f| f.t_us == t_us) {
+            frames.push(FrameRequest {
+                t_us,
+                want_jpeg: true,
+                want_raw: false,
+            });
+        }
     }
     frames.sort_by_key(|f| f.t_us);
+    frames.dedup_by_key(|f| f.t_us);
     ExtractionPlan { frames }
 }
 
@@ -75,12 +97,15 @@ mod tests {
     }
 
     #[test]
-    fn plan_snaps_to_frames_and_dedupes() {
-        // 60 fps frame grid.
+    fn plan_covers_cv_window_plus_evidence() {
+        // 60 fps, 15 s clip; event at 9.2 s → CV window 3.2..10.2 s.
         let pts: Vec<f64> = (0..900).map(|i| i as f64 / 60.0).collect();
         let plan = plan_extraction(&event(9.2), &pts);
-        assert_eq!(plan.frames.len(), EVIDENCE_OFFSETS_S.len());
-        // Snapped exactly onto the grid, strictly increasing.
+        let raw = plan.frames.iter().filter(|f| f.want_raw).count();
+        let jpeg = plan.frames.iter().filter(|f| f.want_jpeg).count();
+        assert_eq!(raw, 7 * 60 + 1, "dense CV window @60fps");
+        assert_eq!(jpeg, EVIDENCE_OFFSETS_S.len());
+        // Strictly increasing, snapped to the grid.
         for pair in plan.frames.windows(2) {
             assert!(pair[0].t_us < pair[1].t_us);
         }
@@ -98,5 +123,8 @@ mod tests {
         let plan = plan_extraction(&event(0.2), &pts);
         assert!(!plan.frames.is_empty());
         assert_eq!(plan.frames[0].t_us, 0);
+        // Negative-time offsets all clamp to frame 0; only the distinct
+        // snapped timestamps remain.
+        assert!(plan.frames.iter().filter(|f| f.want_jpeg).count() >= 3);
     }
 }

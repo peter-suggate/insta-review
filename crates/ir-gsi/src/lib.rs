@@ -8,9 +8,9 @@ pub mod install;
 pub mod model;
 pub mod server;
 
-pub use derive::Differ;
+pub use derive::{sample, Differ};
 pub use model::GsiPayload;
-pub use server::GsiServer;
+pub use server::{GsiServer, GsiUpdate};
 
 /// The gamestate_integration cfg CS2 needs. Installed into
 /// `…/game/csgo/cfg/` (M4 adds automatic Steam-path discovery; until then

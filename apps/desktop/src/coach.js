@@ -18,9 +18,10 @@ const SEVERITY_COLOR = {
 const SEVERITY_ORDER = { major: 0, minor: 1, info: 2, positive: 3 };
 
 export class Coach {
-  constructor({ onToast, onSeek } = {}) {
+  constructor({ onToast, onSeek, onTrace } = {}) {
     this.onToast = onToast || (() => {});
     this.onSeek = onSeek || (() => {});
+    this.onTrace = onTrace || (() => {});
     this.clip = null; // { samples, buffer, decoderConfig, gsiOffset }
     this.busy = false;
     this.currentEventId = null;
@@ -38,6 +39,7 @@ export class Coach {
     listen("analysis-complete", ({ payload }) => {
       this.busy = false;
       this.render(payload.report);
+      if (payload.trace) this.onTrace(payload.trace);
     });
     listen("analysis-error", ({ payload }) => {
       this.busy = false;
@@ -89,8 +91,7 @@ export class Coach {
         return;
       }
       this.progress({ stage: "extracting", detail: "extracting frames…" });
-      const wants = res.plan.frames.filter((f) => f.wantJpeg);
-      const sent = await extractFrames({ ...this.clip, wants });
+      const sent = await extractFrames({ ...this.clip, wants: res.plan.frames });
       if (!sent) throw new Error("no frames could be extracted");
       await invoke("analysis_run");
       // Completion arrives via analysis-complete / analysis-error events.

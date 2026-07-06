@@ -239,16 +239,20 @@ fn snapshot_on_key(
     std::fs::create_dir_all(out_dir)?;
     let handle = start_engine(args, window)?;
 
-    // GSI listener → markers on the engine's clock at receipt time.
+    // GSI listener → markers + state samples on the engine's clock at
+    // receipt time.
     let _gsi = match gsi_port {
         Some(port) => {
             let clock = handle.clock();
             let marker_tx = handle.marker_sender();
-            Some(ir_gsi::GsiServer::start(port, gsi_token, move |kind| {
-                marker_tx.send(Marker {
-                    ts: clock.now(),
-                    kind,
-                });
+            Some(ir_gsi::GsiServer::start(port, gsi_token, move |update| {
+                let ts = clock.now();
+                for kind in update.markers {
+                    marker_tx.send(Marker { ts, kind });
+                }
+                if let Some(state) = update.sample {
+                    marker_tx.send_sample(ir_types::GsiSample { ts, state });
+                }
             })?)
         }
         None => None,

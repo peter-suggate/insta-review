@@ -70,11 +70,14 @@ pub fn restart_capture(app: &AppHandle) -> Result<(), String> {
         match ir_gsi::GsiServer::start(
             settings.gsi_port,
             Some(settings.gsi_token.clone()),
-            move |kind| {
-                marker_tx.send(Marker {
-                    ts: clock.now(),
-                    kind,
-                });
+            move |update| {
+                let ts = clock.now();
+                for kind in update.markers {
+                    marker_tx.send(Marker { ts, kind });
+                }
+                if let Some(state) = update.sample {
+                    marker_tx.send_sample(ir_types::GsiSample { ts, state });
+                }
             },
         ) {
             Ok(server) => *state.gsi.lock().unwrap() = Some(server),

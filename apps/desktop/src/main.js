@@ -114,6 +114,7 @@ function replay() {
 function clearAll() {
   if (!clipMeta) return;
   clipMeta = null; // aborts the in-flight filmstrip build too
+  coach.close(); // cancels any in-flight analysis; findings were this clip's
   player.reset();
   const video = $("video");
   video.getContext("2d").clearRect(0, 0, video.width, video.height);
@@ -158,6 +159,7 @@ const coach = new Coach({
     player.pause();
     player.seekToUs(tS * 1e6).catch(console.error);
   },
+  onTrace: (trace) => timeline.setAnalysis(trace),
 });
 
 // Kill/death marker nearest the playhead (display times, i.e. GSI-shifted).

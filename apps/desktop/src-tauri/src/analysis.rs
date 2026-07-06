@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ir_analysis::cv::{self, FrameStore, LumaFrame};
 use ir_analysis::llm::{self, LlmConfig, LlmError, LlmRequest};
 use ir_analysis::store::{self, RunDirs};
 use ir_analysis::types::{
@@ -32,8 +33,10 @@ pub struct ActiveAnalysis {
     pub dirs: RunDirs,
     pub plan: ExtractionPlan,
     pub meta: ClipMeta,
-    /// t_us of frames the webview has delivered so far.
+    /// t_us of JPEG evidence frames the webview has delivered so far.
     pub received: Vec<u64>,
+    /// Downscaled luma frames for the CV pass.
+    pub frame_store: FrameStore,
     pub cancel: Arc<CancelSignal>,
     /// True once `analysis_run` has spawned the pipeline task.
     pub running: bool,
@@ -141,6 +144,7 @@ pub fn analysis_begin(
         plan,
         meta,
         received: Vec::new(),
+        frame_store: FrameStore::default(),
         cancel: Arc::new(CancelSignal::new()),
         running: false,
     });
@@ -151,9 +155,10 @@ pub fn analysis_begin(
     })
 }
 
-/// One extracted frame from the webview. Raw-payload invoke: JPEG bytes as
-/// the body, timestamp in a `t-us` header (headers are the only side
-/// channel Tauri gives a raw body).
+/// One extracted frame from the webview. Raw-payload invoke: bytes as the
+/// body, metadata in headers (the only side channel Tauri gives a raw
+/// body). `kind: jpeg` = full-res evidence file; `kind: luma` = downscaled
+/// grayscale for CV (`w`/`h` headers required).
 #[tauri::command]
 pub fn analysis_frame(
     app: AppHandle,
@@ -163,12 +168,17 @@ pub fn analysis_frame(
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected a raw body".into());
     };
-    let t_us: u64 = request
-        .headers()
-        .get("t-us")
-        .and_then(|v| v.to_str().ok())
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let t_us: u64 = header("t-us")
         .and_then(|s| s.parse().ok())
         .ok_or("missing/invalid t-us header")?;
+    let kind = header("kind").unwrap_or_else(|| "jpeg".into());
 
     let mut active = state.analysis.lock().unwrap();
     let active = active.as_mut().ok_or("no analysis in progress")?;
@@ -176,18 +186,46 @@ pub fn analysis_frame(
         return Err(format!("frame {t_us} is not in the extraction plan"));
     }
 
-    let path = active.dirs.frames_dir.join(store::frame_file_name(t_us));
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    if !active.received.contains(&t_us) {
-        active.received.push(t_us);
+    let (delivered, total) = match kind.as_str() {
+        "luma" => {
+            let w: u32 = header("w").and_then(|s| s.parse().ok()).ok_or("missing w")?;
+            let h: u32 = header("h").and_then(|s| s.parse().ok()).ok_or("missing h")?;
+            if (w * h) as usize != bytes.len() {
+                return Err(format!("luma size mismatch: {w}x{h} vs {}", bytes.len()));
+            }
+            active.frame_store.push(LumaFrame {
+                t_us,
+                w,
+                h,
+                data: bytes.clone(),
+            });
+            (
+                active.frame_store.len(),
+                active.plan.frames.iter().filter(|f| f.want_raw).count(),
+            )
+        }
+        _ => {
+            let path = active.dirs.frames_dir.join(store::frame_file_name(t_us));
+            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+            if !active.received.contains(&t_us) {
+                active.received.push(t_us);
+            }
+            (
+                active.received.len(),
+                active.plan.frames.iter().filter(|f| f.want_jpeg).count(),
+            )
+        }
+    };
+    // Dense luma runs arrive at hundreds/second — don't flood the UI.
+    if delivered % 24 == 0 || delivered == total {
+        emit_progress(
+            &app,
+            "extracting",
+            format!("frame {delivered}/{total}"),
+            delivered as u64,
+            total as u64,
+        );
     }
-    emit_progress(
-        &app,
-        "extracting",
-        format!("frame {}/{}", active.received.len(), active.plan.frames.len()),
-        active.received.len() as u64,
-        active.plan.frames.len() as u64,
-    );
     Ok(())
 }
 
@@ -195,7 +233,7 @@ pub fn analysis_frame(
 /// persist, emit. Returns immediately; results arrive as events.
 #[tauri::command]
 pub fn analysis_run(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let (event, clip_mp4, dirs, plan, meta, received, cancel) = {
+    let (event, clip_mp4, dirs, plan, meta, received, frames, cancel) = {
         let mut active = state.analysis.lock().unwrap();
         let active = active.as_mut().ok_or("no analysis in progress")?;
         if active.running {
@@ -212,21 +250,27 @@ pub fn analysis_run(app: AppHandle, state: State<AppState>) -> Result<(), String
             active.plan.clone(),
             active.meta.clone(),
             active.received.clone(),
+            std::mem::take(&mut active.frame_store),
             active.cancel.clone(),
         )
     };
     let settings = state.settings.lock().unwrap().clone();
     let prompts_dir = prompts_dir(&app);
+    let analysis_cfg = ir_analysis::config::load_or_init(
+        &app.path()
+            .app_config_dir()
+            .unwrap_or_else(|_| PathBuf::from(".")),
+    );
 
     tauri::async_runtime::spawn(async move {
         let result = run_pipeline(
-            &app, &event, &clip_mp4, &dirs, &plan, &meta, &received, &cancel, &settings,
-            &prompts_dir,
+            &app, &event, &clip_mp4, &dirs, &plan, &meta, &received, frames, &cancel,
+            &settings, &analysis_cfg, &prompts_dir,
         )
         .await;
         match result {
-            Ok(report) => {
-                let _ = app.emit("analysis-complete", json!({ "report": report }));
+            Ok((report, trace)) => {
+                let _ = app.emit("analysis-complete", json!({ "report": report, "trace": trace }));
             }
             Err((stage, err)) => {
                 warn!(stage, "analysis failed: {err}");
@@ -329,11 +373,60 @@ async fn run_pipeline(
     plan: &ExtractionPlan,
     meta: &ClipMeta,
     received: &[u64],
+    frames: FrameStore,
     cancel: &CancelSignal,
     settings: &AppSettings,
+    analysis_cfg: &ir_analysis::config::AnalysisConfig,
     prompts_dir: &std::path::Path,
-) -> Result<AnalysisReport, (&'static str, LlmError)> {
+) -> Result<(AnalysisReport, serde_json::Value), (&'static str, LlmError)> {
     let fail = |stage: &'static str| move |e: LlmError| (stage, e);
+
+    // ---- measure (local CV) ----------------------------------------------
+    emit_progress(
+        app,
+        "measuring",
+        format!("analyzing {} frames", frames.len()),
+        0,
+        0,
+    );
+    let cv_report = cv::analyze(
+        event,
+        &frames,
+        &meta.gsi_trace,
+        (meta.width, meta.height),
+        settings.stretch_43,
+        settings.gsi_offset_seconds as f64,
+        analysis_cfg,
+    );
+    let _ = store::write_json(&dirs.run_dir, "traces.json", &cv_report);
+    info!(
+        flow_samples = cv_report.flow.len(),
+        candidates = cv_report.candidates.len(),
+        shots = cv_report.shots.len(),
+        flicks = cv_report.flicks.len(),
+        "CV pass done"
+    );
+
+    // Compact per-sample trace for the timeline overlay (movement state
+    // resolved per flow sample).
+    let overlay_trace: Vec<serde_json::Value> = cv_report
+        .flow
+        .iter()
+        .map(|s| {
+            let moving = cv_report
+                .movement
+                .iter()
+                .find(|iv| s.t >= iv.start_s && s.t <= iv.end_s)
+                .map(|iv| iv.state)
+                .unwrap_or(ir_analysis::cv::motion::MoveState::Unreliable);
+            json!({
+                "t": (s.t * 1000.0).round() / 1000.0,
+                "yawDps": (s.yaw_dps * 10.0).round() / 10.0,
+                "moving": moving,
+            })
+        })
+        .collect();
+    let overlay = json!({ "flow": overlay_trace });
 
     // ---- compose ---------------------------------------------------------
     emit_progress(app, "composing", "rendering prompts".into(), 0, 0);
@@ -366,6 +459,15 @@ async fn run_pipeline(
         "timelineMarkers": markers,
         "markerAccuracy": "marker times come from CS2 game-state integration and are approximate (within ~0.3s)",
         "hotkeyPressedAtS": meta.trigger_at,
+        "cv": {
+            "note": "machine measurements from optical flow on the clip and the GSI ammo/state trace; \
+                     movement is a classifier (stationary/moving/unreliable), never a speed; \
+                     shot times from ammo decrements carry the stated uncertainty",
+            "movementIntervals": cv_report.movement,
+            "shots": cv_report.shots,
+            "flicks": cv_report.flicks,
+        },
+        "cvCandidates": cv_report.candidates,
     });
 
     let manifest: String = plan
@@ -478,7 +580,10 @@ async fn run_pipeline(
             }
         }
     };
-    let (findings, degradations) = ir_analysis::parse::to_findings(&output);
+    let (findings, mut degradations) = ir_analysis::parse::to_findings(&output);
+    if !frames.is_empty() && cv_report.flow.is_empty() {
+        degradations.push("CV produced no flow trace (frames too sparse?)".into());
+    }
 
     // ---- report ----------------------------------------------------------
     let report = AnalysisReport {
@@ -486,7 +591,12 @@ async fn run_pipeline(
         event: event.clone(),
         summary: output.summary.clone(),
         findings,
-        metrics: serde_json::Value::Null,
+        metrics: json!({
+            "candidates": cv_report.candidates,
+            "shots": cv_report.shots,
+            "flicks": cv_report.flicks,
+            "movementIntervals": cv_report.movement,
+        }),
         provider: ProviderInfo {
             provider: settings.llm_provider.clone(),
             model: settings.llm_model.clone(),
@@ -494,7 +604,7 @@ async fn run_pipeline(
             duration_ms: outcome.duration_ms,
         },
         degradations,
-        analyzer_versions: Default::default(),
+        analyzer_versions: cv_report.versions.clone(),
         frames: received.iter().map(|&t| t as f64 / 1e6).collect(),
     };
     store::persist_report(dirs, &report)
@@ -505,5 +615,5 @@ async fn run_pipeline(
         clip = %clip_mp4.display(),
         "analysis complete"
     );
-    Ok(report)
+    Ok((report, overlay))
 }

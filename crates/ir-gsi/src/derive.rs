@@ -1,11 +1,56 @@
 //! Stateful differ: consecutive GSI payloads → timeline markers.
+//! Plus the stateless per-payload state sample (weapon/ammo/health/flash)
+//! the analysis layer consumes as a continuous trace.
 //!
 //! We diff against our own previous state rather than trusting the
 //! payload's `previously` block — simpler and robust to missed posts.
 
-use ir_types::MarkerKind;
+use ir_types::{GsiState, MarkerKind};
 
 use crate::model::GsiPayload;
+
+/// Is this payload about the local player? When spectating, `player` is
+/// whoever is being observed. Missing ids: assume local, don't drop data.
+fn is_local(payload: &GsiPayload) -> bool {
+    match (
+        payload.provider.as_ref().and_then(|p| p.steamid.as_ref()),
+        payload.player.as_ref().and_then(|p| p.steamid.as_ref()),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// Instantaneous state sample from one payload, or None when the payload
+/// has no local-player block (menus, spectating).
+pub fn sample(payload: &GsiPayload) -> Option<GsiState> {
+    if !is_local(payload) {
+        return None;
+    }
+    let player = payload.player.as_ref()?;
+    let active = player
+        .weapons
+        .as_ref()
+        .and_then(|ws| ws.values().find(|w| w.state.as_deref() == Some("active")));
+    let state = player.state.as_ref();
+    Some(GsiState {
+        weapon: active
+            .and_then(|w| w.name.clone())
+            .unwrap_or_default(),
+        ammo_clip: active
+            .and_then(|w| w.ammo_clip)
+            .and_then(|a| u32::try_from(a).ok()),
+        health: state
+            .and_then(|s| s.health)
+            .and_then(|h| u32::try_from(h).ok()),
+        flashed: state
+            .and_then(|s| s.flashed)
+            .map_or(0, |f| f.clamp(0, 255) as u8),
+        smoked: state
+            .and_then(|s| s.smoked)
+            .map_or(0, |f| f.clamp(0, 255) as u8),
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct Differ {
@@ -26,13 +71,7 @@ impl Differ {
 
         // Only derive player markers when the payload describes the local
         // player (when spectating, `player` is whoever is being observed).
-        let local = match (
-            next.provider.as_ref().and_then(|p| p.steamid.as_ref()),
-            next.player.as_ref().and_then(|p| p.steamid.as_ref()),
-        ) {
-            (Some(a), Some(b)) => a == b,
-            _ => true, // missing ids: assume local rather than dropping data
-        };
+        let local = is_local(next);
 
         if local {
             let prev_player = prev.player.as_ref();
@@ -201,6 +240,36 @@ mod tests {
             "player": {"steamid": "SOMEONE_ELSE", "match_stats": {"kills": 3}}
         })));
         assert!(markers.is_empty());
+    }
+
+    #[test]
+    fn sample_extracts_active_weapon_and_state() {
+        let p = payload(serde_json::json!({
+            "provider": {"steamid": "7656"},
+            "player": {
+                "steamid": "7656",
+                "state": {"health": 73, "flashed": 120, "smoked": 0},
+                "weapons": {
+                    "weapon_0": {"name": "weapon_knife", "state": "holstered"},
+                    "weapon_1": {"name": "weapon_ak47", "state": "active",
+                                  "ammo_clip": 17, "ammo_clip_max": 30, "type": "Rifle"}
+                }
+            }
+        }));
+        let s = sample(&p).unwrap();
+        assert_eq!(s.weapon, "weapon_ak47");
+        assert_eq!(s.ammo_clip, Some(17));
+        assert_eq!(s.health, Some(73));
+        assert_eq!(s.flashed, 120);
+    }
+
+    #[test]
+    fn sample_ignores_spectated_player() {
+        let p = payload(serde_json::json!({
+            "provider": {"steamid": "ME"},
+            "player": {"steamid": "OTHER", "state": {"health": 50}}
+        }));
+        assert!(sample(&p).is_none());
     }
 
     #[test]

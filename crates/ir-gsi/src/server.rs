@@ -5,11 +5,19 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use ir_types::MarkerKind;
+use ir_types::{GsiState, MarkerKind};
 use tracing::{debug, info, warn};
 
-use crate::derive::Differ;
+use crate::derive::{sample, Differ};
 use crate::model::GsiPayload;
+
+/// Everything one GSI payload yields: derived event markers plus the
+/// instantaneous state sample (both may be empty/None).
+#[derive(Debug, Clone)]
+pub struct GsiUpdate {
+    pub markers: Vec<MarkerKind>,
+    pub sample: Option<GsiState>,
+}
 
 pub struct GsiServer {
     stop: Arc<AtomicBool>,
@@ -18,14 +26,14 @@ pub struct GsiServer {
 }
 
 impl GsiServer {
-    /// Start listening on 127.0.0.1:`port`. Each derived marker is handed
-    /// to `on_marker` (which should stamp it with the capture clock).
-    /// If `token` is set, payloads whose auth token doesn't match are
-    /// dropped.
+    /// Start listening on 127.0.0.1:`port`. Each authorized payload yields
+    /// one `on_update` call (which should stamp times with the capture
+    /// clock). If `token` is set, payloads whose auth token doesn't match
+    /// are dropped.
     pub fn start(
         port: u16,
         token: Option<String>,
-        on_marker: impl Fn(MarkerKind) + Send + 'static,
+        on_update: impl Fn(GsiUpdate) + Send + 'static,
     ) -> Result<Self, String> {
         let server = tiny_http::Server::http(("127.0.0.1", port))
             .map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
@@ -58,10 +66,14 @@ impl GsiServer {
                                 (Some(_), None) => false,
                             };
                             if authorized {
-                                for kind in differ.push(&payload) {
-                                    debug!(?kind, "GSI marker");
-                                    on_marker(kind);
+                                let update = GsiUpdate {
+                                    markers: differ.push(&payload),
+                                    sample: sample(&payload),
+                                };
+                                if !update.markers.is_empty() {
+                                    debug!(markers = ?update.markers, "GSI markers");
                                 }
+                                on_update(update);
                             } else {
                                 warn!("GSI payload with bad/missing auth token dropped");
                             }

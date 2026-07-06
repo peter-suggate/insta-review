@@ -2,11 +2,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, unbounded, Sender};
-use ir_types::{CodecConfig, EncodedPacket, Marker, PipelineConfig, PipelineError, PipelineEvent};
+use ir_types::{
+    CodecConfig, EncodedPacket, GsiSample, Marker, PipelineConfig, PipelineError, PipelineEvent,
+};
 use tracing::{info, warn};
 
 use crate::clock::CaptureClock;
-use crate::markers::MarkerLog;
+use crate::markers::{GsiTraceLog, MarkerLog};
 use crate::pipeline::{CapturePipeline, PacketSink};
 use crate::ring::{ReplayRing, RingStats};
 use crate::snapshot::{build_clip, Clip};
@@ -21,6 +23,7 @@ pub enum EngineCommand {
         reply: Sender<Option<Clip>>,
     },
     AddMarker(Marker),
+    AddGsiSample(GsiSample),
     Stats {
         reply: Sender<RingStats>,
     },
@@ -48,7 +51,8 @@ pub struct EngineHandle {
     join: Option<JoinHandle<()>>,
 }
 
-/// Cheap clonable handle for feeding markers from other threads (GSI).
+/// Cheap clonable handle for feeding markers and GSI state samples from
+/// other threads (GSI listener).
 #[derive(Clone)]
 pub struct MarkerSender {
     cmd_tx: Sender<EngineCommand>,
@@ -57,6 +61,10 @@ pub struct MarkerSender {
 impl MarkerSender {
     pub fn send(&self, marker: Marker) {
         let _ = self.cmd_tx.send(EngineCommand::AddMarker(marker));
+    }
+
+    pub fn send_sample(&self, sample: GsiSample) {
+        let _ = self.cmd_tx.send(EngineCommand::AddGsiSample(sample));
     }
 }
 
@@ -133,6 +141,7 @@ impl Engine {
             .spawn(move || {
                 let mut ring = ReplayRing::new(retain, max_bytes);
                 let mut markers = MarkerLog::new(retain);
+                let mut gsi_trace = GsiTraceLog::new(retain);
                 loop {
                     crossbeam_channel::select! {
                         recv(event_rx) -> ev => match ev {
@@ -154,11 +163,17 @@ impl Engine {
                                 let clip = ring.snapshot(window).map(|snap| {
                                     let from = snap.packets[0].pts;
                                     let to = snap.packets.last().unwrap().end_pts();
-                                    build_clip(snap, markers.range(from, to), trigger_ts)
+                                    build_clip(
+                                        snap,
+                                        markers.range(from, to),
+                                        gsi_trace.range(from, to),
+                                        trigger_ts,
+                                    )
                                 });
                                 let _ = reply.send(clip);
                             }
                             Ok(EngineCommand::AddMarker(m)) => markers.push(m),
+                            Ok(EngineCommand::AddGsiSample(s)) => gsi_trace.push(s),
                             Ok(EngineCommand::Stats { reply }) => {
                                 let _ = reply.send(ring.stats());
                             }

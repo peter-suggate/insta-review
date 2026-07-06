@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use ir_types::{ClipMarker, ClipMeta, CodecConfig, EncodedPacket, Marker};
+use ir_types::{
+    ClipGsiSample, ClipMarker, ClipMeta, CodecConfig, EncodedPacket, GsiSample, Marker,
+    CLIP_META_VERSION,
+};
 
 use crate::ring::RingSnapshot;
 
@@ -15,9 +18,15 @@ pub struct Clip {
     pub meta: ClipMeta,
 }
 
-/// Assemble a clip from a ring snapshot, the markers in its window, and the
-/// trigger (hotkey) time. All times are rebased to clip-relative seconds.
-pub fn build_clip(snap: RingSnapshot, markers: Vec<Marker>, trigger_ts: Duration) -> Clip {
+/// Assemble a clip from a ring snapshot, the markers and GSI samples in its
+/// window, and the trigger (hotkey) time. All times are rebased to
+/// clip-relative seconds.
+pub fn build_clip(
+    snap: RingSnapshot,
+    markers: Vec<Marker>,
+    gsi_trace: Vec<GsiSample>,
+    trigger_ts: Duration,
+) -> Clip {
     let base = snap.packets[0].pts;
     let rel = |ts: Duration| ts.saturating_sub(base).as_secs_f64();
 
@@ -36,14 +45,23 @@ pub fn build_clip(snap: RingSnapshot, markers: Vec<Marker>, trigger_ts: Duration
             kind: m.kind,
         })
         .collect();
+    let gsi_trace: Vec<ClipGsiSample> = gsi_trace
+        .into_iter()
+        .map(|s| ClipGsiSample {
+            at: rel(s.ts),
+            state: s.state,
+        })
+        .collect();
 
     let meta = ClipMeta {
+        meta_version: CLIP_META_VERSION,
         width: snap.codec.width,
         height: snap.codec.height,
         nominal_fps: snap.codec.nominal_fps,
         frame_pts,
         keyframe_indices,
         markers,
+        gsi_trace,
         trigger_at: rel(trigger_ts),
     };
 

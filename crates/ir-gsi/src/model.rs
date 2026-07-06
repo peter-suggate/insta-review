@@ -50,6 +50,21 @@ pub struct Player {
     pub name: Option<String>,
     pub state: Option<PlayerState>,
     pub match_stats: Option<MatchStats>,
+    /// Keyed "weapon_0", "weapon_1", ... — slot keys, not weapon names.
+    pub weapons: Option<std::collections::HashMap<String, Weapon>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Weapon {
+    /// "weapon_ak47", "weapon_knife_butterfly", ...
+    pub name: Option<String>,
+    /// "active" | "holstered" | "reloading"
+    pub state: Option<String>,
+    pub ammo_clip: Option<i32>,
+    pub ammo_clip_max: Option<i32>,
+    /// "Rifle", "Pistol", "Knife", "SniperRifle", ...
+    #[serde(rename = "type")]
+    pub weapon_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
