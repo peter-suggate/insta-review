@@ -125,8 +125,8 @@ pub enum MarkerKind {
 
 /// Instantaneous player state sampled from a GSI payload (~10 Hz).
 /// Continuous state, not events — the analysis layer diffs it (ammo →
-/// shot counts, flashed/smoked → reliability gates).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// shot counts, position → velocity, flashed/smoked → reliability gates).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GsiState {
     /// Active weapon name ("weapon_ak47"); empty when unknown.
     #[serde(default)]
@@ -139,6 +139,13 @@ pub struct GsiState {
     /// 0-255 smoke occlusion.
     #[serde(default)]
     pub smoked: u8,
+    /// World position in game units (player_position component; absent on
+    /// older cfg installs — reinstall the GSI cfg to get it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 3]>,
+    /// View-direction unit vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<[f64; 3]>,
 }
 
 /// A [`GsiState`] stamped against the capture clock (engine side; the

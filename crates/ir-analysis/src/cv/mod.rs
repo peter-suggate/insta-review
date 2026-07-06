@@ -4,6 +4,7 @@
 //! ever *interprets* these measurements, never produces them.
 
 pub mod flow;
+pub mod gsi_motion;
 pub mod motion;
 
 use ir_types::ClipGsiSample;
@@ -91,6 +92,14 @@ pub struct CvReport {
     pub shots: Vec<motion::ShotEvent>,
     pub flicks: Vec<motion::Flick>,
     pub candidates: Vec<motion::Candidate>,
+    /// Measured horizontal speed (u/s) from GSI position deltas; empty on
+    /// pre-position cfg installs.
+    pub speed: Vec<gsi_motion::SpeedSample>,
+    /// View angles from the GSI forward vector.
+    pub view: Vec<gsi_motion::ViewSample>,
+    /// Integrated optical-flow yaw ÷ GSI view-direction yaw over the same
+    /// spans (~1.0 = calibrated); None = not enough rotation to judge.
+    pub flow_yaw_ratio: Option<f64>,
     /// Analyzer id → version, for the report's provenance.
     pub versions: std::collections::BTreeMap<String, String>,
 }
@@ -108,15 +117,19 @@ pub fn analyze(
 ) -> CvReport {
     let calib = Calib::new(clip_dims.0, clip_dims.1, stretched43);
     let flow = flow::flow_trace(frames.frames(), &calib, clip_dims, &cfg.flow);
-    let movement = motion::movement_intervals(&flow, gsi, cfg);
+    let speed = gsi_motion::speed_trace(gsi, gsi_offset_s);
+    let view = gsi_motion::view_trace(gsi, gsi_offset_s);
+    let movement = motion::movement_intervals(&flow, gsi, &speed, cfg);
     let shots = motion::shots_from_gsi(gsi, gsi_offset_s);
     let flicks = motion::flicks(&flow, cfg);
-    let candidates = motion::candidates(event.at_s, &movement, &shots, &flicks, cfg);
+    let candidates = motion::candidates(event.at_s, &movement, &shots, &flicks, &speed, cfg);
+    let flow_yaw_ratio = gsi_motion::flow_vs_gsi_yaw_ratio(&flow, &view);
     let versions = [
         ("flow".to_string(), "1".to_string()),
-        ("movement".to_string(), "1".to_string()),
+        ("movement".to_string(), "2".to_string()),
         ("shots-gsi".to_string(), "1".to_string()),
         ("flick".to_string(), "1".to_string()),
+        ("gsi-motion".to_string(), "1".to_string()),
     ]
     .into();
     CvReport {
@@ -126,12 +139,32 @@ pub fn analyze(
         shots,
         flicks,
         candidates,
+        speed,
+        view,
+        flow_yaw_ratio,
         versions,
     }
 }
 
+/// Self-check degradations derived from the CV pass itself (appended to
+/// whatever the report pipeline adds).
+pub fn cv_degradations(cv: &CvReport) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(ratio) = cv.flow_yaw_ratio {
+        if !(0.5..=2.0).contains(&ratio) {
+            out.push(format!(
+                "optical-flow rotation disagrees with GSI view data \
+                 (flow/GSI yaw ratio {ratio:.2}) — flick/velocity numbers suspect; \
+                 check the stretched-4:3 setting"
+            ));
+        }
+    }
+    out
+}
+
 /// Compact per-sample trace for UI overlays and report metrics: movement
-/// state resolved per flow sample, values rounded to keep JSON small.
+/// state resolved per flow sample, measured speed (u/s) where GSI covers
+/// it, values rounded to keep JSON small.
 pub fn flow_trace_json(cv: &CvReport) -> Vec<serde_json::Value> {
     cv.flow
         .iter()
@@ -142,10 +175,12 @@ pub fn flow_trace_json(cv: &CvReport) -> Vec<serde_json::Value> {
                 .find(|iv| s.t >= iv.start_s && s.t <= iv.end_s)
                 .map(|iv| iv.state)
                 .unwrap_or(motion::MoveState::Unreliable);
+            let ups = gsi_motion::speed_at(&cv.speed, s.t, 0.4);
             serde_json::json!({
                 "t": (s.t * 1000.0).round() / 1000.0,
                 "yawDps": (s.yaw_dps * 10.0).round() / 10.0,
                 "moving": moving,
+                "ups": ups.map(|u| u.round()),
             })
         })
         .collect()
@@ -244,7 +279,7 @@ pub fn local_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cv::motion::MoveState;
+    use crate::cv::motion::{MoveSource, MoveState};
     use ir_types::{GsiState, MarkerKind};
 
     const DS_W: u32 = 480;
@@ -344,7 +379,7 @@ mod tests {
             .map(|i| frame(i * 16_667, 0, i as i64 * 3))
             .collect();
         let flow = flow::flow_trace(&frames, &Calib::new(FULL.0, FULL.1, true), FULL, &cfg().flow);
-        let intervals = motion::movement_intervals(&flow, &[], &cfg());
+        let intervals = motion::movement_intervals(&flow, &[], &[], &cfg());
         assert!(
             intervals
                 .iter()
@@ -354,10 +389,54 @@ mod tests {
     }
 
     #[test]
+    fn measured_speed_beats_visual_classifier_both_ways() {
+        let gsi = |positions: Vec<[f64; 3]>| -> Vec<ClipGsiSample> {
+            positions
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| ClipGsiSample {
+                    at: i as f64 * 0.1,
+                    state: GsiState {
+                        position: Some(p),
+                        ..Default::default()
+                    },
+                })
+                .collect()
+        };
+
+        // (a) Visually static frames, but GSI measures a 250 u/s run:
+        // the fused verdict must be Moving, from measurement.
+        let frames_static: Vec<LumaFrame> = (0..40).map(|i| frame(i * 16_667, 0, 0)).collect();
+        let running = gsi((0..9).map(|i| [i as f64 * 25.0, 0.0, 0.0]).collect());
+        let r = analyze(&event(0.4), &store(frames_static), &running, FULL, true, 0.0, &cfg());
+        assert!(
+            r.movement
+                .iter()
+                .any(|iv| iv.state == MoveState::Moving && iv.source != MoveSource::Visual),
+            "GSI-measured run must classify as moving: {:?}",
+            r.movement
+        );
+
+        // (b) Ground parallax fools the flow classifier, but GSI measures
+        // standing still: no sustained Moving verdict may survive.
+        let frames_parallax: Vec<LumaFrame> =
+            (0..40).map(|i| frame(i * 16_667, 0, i as i64 * 3)).collect();
+        let standing = gsi(vec![[100.0, 200.0, 0.0]; 9]);
+        let r = analyze(&event(0.4), &store(frames_parallax), &standing, FULL, true, 0.0, &cfg());
+        assert!(
+            !r.movement
+                .iter()
+                .any(|iv| iv.state == MoveState::Moving && iv.end_s - iv.start_s > 0.2),
+            "measured stillness must override visual parallax: {:?}",
+            r.movement
+        );
+    }
+
+    #[test]
     fn static_scene_is_stationary() {
         let frames: Vec<LumaFrame> = (0..30).map(|i| frame(i * 16_667, 0, 0)).collect();
         let flow = flow::flow_trace(&frames, &Calib::new(FULL.0, FULL.1, true), FULL, &cfg().flow);
-        let intervals = motion::movement_intervals(&flow, &[], &cfg());
+        let intervals = motion::movement_intervals(&flow, &[], &[], &cfg());
         assert!(
             intervals.iter().all(|iv| iv.state == MoveState::Stationary),
             "{intervals:?}"
@@ -376,6 +455,7 @@ mod tests {
                 health: Some(100),
                 flashed: 0,
                 smoked: 0,
+                ..Default::default()
             },
         };
         let trace = vec![
@@ -407,6 +487,7 @@ mod tests {
                     health: Some(100),
                     flashed: 0,
                     smoked: 0,
+                    ..Default::default()
                 },
             },
             ClipGsiSample {
@@ -417,6 +498,7 @@ mod tests {
                     health: Some(100),
                     flashed: 0,
                     smoked: 0,
+                    ..Default::default()
                 },
             },
         ];
@@ -445,6 +527,7 @@ mod tests {
                     health: Some(100),
                     flashed: 0,
                     smoked: 0,
+                    ..Default::default()
                 },
             },
             ClipGsiSample {
@@ -455,6 +538,7 @@ mod tests {
                     health: Some(100),
                     flashed: 0,
                     smoked: 0,
+                    ..Default::default()
                 },
             },
         ];

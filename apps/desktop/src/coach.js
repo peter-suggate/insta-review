@@ -286,19 +286,26 @@ export class Coach {
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "coach-chart" });
     svgTitle(svg, "click to seek the video");
 
-    // Movement band.
+    // Movement band. Measured intervals (GSI position trace) draw solid;
+    // visual-classifier ones stay slightly translucent — same hue, so the
+    // distinction whispers rather than shouts.
     for (const iv of intervals) {
       if (iv.endS < t0 || iv.startS > t1) continue;
       const x0 = x(clampT(iv.startS));
+      const measured = iv.source === "measured";
       const band = svgEl("rect", {
         x: x0.toFixed(1),
         y: BAND_Y,
         width: Math.max(x(clampT(iv.endS)) - x0, 1).toFixed(1),
         height: BAND_H,
         fill: stateColor[iv.state] || stateColor.unreliable,
-        opacity: 0.85,
+        opacity: measured ? 1 : 0.7,
       });
-      svgTitle(band, `${iv.state} ${iv.startS.toFixed(2)}–${iv.endS.toFixed(2)}s`);
+      svgTitle(
+        band,
+        `${iv.state} ${iv.startS.toFixed(2)}–${iv.endS.toFixed(2)}s` +
+          (iv.source ? ` (${measured ? "GSI-measured" : iv.source})` : "")
+      );
       svg.appendChild(band);
     }
     const cap = svgEl("text", { x: 1, y: BAND_Y - 2, fill: "#8a8a94", "font-size": 7 });
@@ -343,6 +350,39 @@ export class Coach {
       });
       vl.textContent = `view ±${Math.round(vmax)}°/s`;
       svg.appendChild(vl);
+    }
+
+    // Measured speed (GSI position trace) as a filled area rising from the
+    // curve baseline — area = how fast the feet were, line = the eyes.
+    const withUps = inWin.filter((s) => s.ups != null);
+    if (withUps.length > 1) {
+      const smax = Math.max(260, ...withUps.map((s) => s.ups));
+      const sy = (u) => CURVE_BOT - (u / smax) * (CURVE_BOT - CURVE_TOP) * 0.9;
+      const d =
+        withUps
+          .map((s, i) => `${i ? "L" : "M"}${x(s.t).toFixed(1)},${sy(s.ups).toFixed(1)}`)
+          .join("") +
+        `L${x(withUps[withUps.length - 1].t).toFixed(1)},${CURVE_BOT}` +
+        `L${x(withUps[0].t).toFixed(1)},${CURVE_BOT}Z`;
+      const area = svgEl("path", {
+        d,
+        fill: "#c9c9d2",
+        opacity: 0.14,
+        stroke: "#c9c9d2",
+        "stroke-opacity": 0.45,
+        "stroke-width": 0.75,
+      });
+      svgTitle(area, "measured speed (GSI position trace)");
+      svg.appendChild(area);
+      const sl = svgEl("text", {
+        x: 1,
+        y: CURVE_BOT - 2,
+        fill: "#8a8a94",
+        "font-size": 7,
+        opacity: 0.85,
+      });
+      sl.textContent = `speed ≤${Math.round(smax)} u/s`;
+      svg.appendChild(sl);
     }
 
     // Shots: uncertainty window + tick + count.

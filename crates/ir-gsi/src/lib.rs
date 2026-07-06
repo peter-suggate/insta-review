@@ -16,6 +16,12 @@ pub use server::{GsiServer, GsiUpdate};
 /// `…/game/csgo/cfg/` (M4 adds automatic Steam-path discovery; until then
 /// users copy it manually). NOTE: must be written WITHOUT a UTF-8 BOM or
 /// CS2 silently ignores it.
+///
+/// `player_position` adds the local player's position + forward (view)
+/// vector to each payload — the analysis layer derives real velocity and
+/// view angles from it. The `output` precision block keeps the vectors at
+/// two decimals instead of integers. Existing installs must re-install the
+/// cfg (and restart CS2) to pick these up.
 pub fn config_file_contents(port: u16, token: &str) -> String {
     format!(
         r#""insta-review"
@@ -29,6 +35,12 @@ pub fn config_file_contents(port: u16, token: &str) -> String {
     {{
         "token" "{token}"
     }}
+    "output"
+    {{
+        "precision_time"     "0.01"
+        "precision_position" "0.01"
+        "precision_vector"   "0.01"
+    }}
     "data"
     {{
         "provider"            "1"
@@ -38,8 +50,20 @@ pub fn config_file_contents(port: u16, token: &str) -> String {
         "player_state"        "1"
         "player_match_stats"  "1"
         "player_weapons"      "1"
+        "player_position"     "1"
     }}
 }}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cfg_subscribes_position_and_is_bom_free() {
+        let cfg = super::config_file_contents(3585, "tok");
+        assert!(cfg.contains(r#""player_position"     "1""#));
+        assert!(cfg.contains(r#""precision_vector"   "0.01""#));
+        assert!(cfg.is_ascii(), "cfg must be plain ASCII (no BOM)");
+    }
 }

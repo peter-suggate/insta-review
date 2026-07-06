@@ -21,6 +21,15 @@ fn is_local(payload: &GsiPayload) -> bool {
     }
 }
 
+/// Parse a GSI vector string (`"-1024.00, 512.50, 64.00"`) into `[x, y, z]`.
+/// Anything malformed is None — position data is an enhancement, never a
+/// reason to drop a sample.
+fn parse_vec3(s: &str) -> Option<[f64; 3]> {
+    let mut parts = s.split(',').map(|p| p.trim().parse::<f64>());
+    let v = [parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?];
+    parts.next().is_none().then_some(v)
+}
+
 /// Instantaneous state sample from one payload, or None when the payload
 /// has no local-player block (menus, spectating).
 pub fn sample(payload: &GsiPayload) -> Option<GsiState> {
@@ -49,6 +58,8 @@ pub fn sample(payload: &GsiPayload) -> Option<GsiState> {
         smoked: state
             .and_then(|s| s.smoked)
             .map_or(0, |f| f.clamp(0, 255) as u8),
+        position: player.position.as_deref().and_then(parse_vec3),
+        forward: player.forward.as_deref().and_then(parse_vec3),
     })
 }
 
@@ -249,6 +260,8 @@ mod tests {
             "player": {
                 "steamid": "7656",
                 "state": {"health": 73, "flashed": 120, "smoked": 0},
+                "position": "-1024.50, 512.00, 64.03",
+                "forward": "0.71, -0.71, 0.00",
                 "weapons": {
                     "weapon_0": {"name": "weapon_knife", "state": "holstered"},
                     "weapon_1": {"name": "weapon_ak47", "state": "active",
@@ -261,6 +274,23 @@ mod tests {
         assert_eq!(s.ammo_clip, Some(17));
         assert_eq!(s.health, Some(73));
         assert_eq!(s.flashed, 120);
+        assert_eq!(s.position, Some([-1024.5, 512.0, 64.03]));
+        assert_eq!(s.forward, Some([0.71, -0.71, 0.0]));
+    }
+
+    #[test]
+    fn malformed_vectors_are_none_not_fatal() {
+        assert_eq!(parse_vec3("1.0, 2.0, 3.0"), Some([1.0, 2.0, 3.0]));
+        assert_eq!(parse_vec3("1.0, 2.0"), None);
+        assert_eq!(parse_vec3("1.0, 2.0, 3.0, 4.0"), None);
+        assert_eq!(parse_vec3("a, b, c"), None);
+        let p = payload(serde_json::json!({
+            "provider": {"steamid": "X"},
+            "player": {"steamid": "X", "state": {"health": 100}, "position": "garbage"}
+        }));
+        let s = sample(&p).unwrap();
+        assert_eq!(s.position, None);
+        assert_eq!(s.health, Some(100));
     }
 
     #[test]

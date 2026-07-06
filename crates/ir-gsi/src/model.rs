@@ -52,6 +52,11 @@ pub struct Player {
     pub match_stats: Option<MatchStats>,
     /// Keyed "weapon_0", "weapon_1", ... — slot keys, not weapon names.
     pub weapons: Option<std::collections::HashMap<String, Weapon>>,
+    /// World position, `"x, y, z"` (player_position component). GSI
+    /// serializes vectors as comma-separated strings.
+    pub position: Option<String>,
+    /// View-direction unit vector, `"x, y, z"` (player_position component).
+    pub forward: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

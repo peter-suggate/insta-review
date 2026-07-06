@@ -56,6 +56,13 @@ pub struct MovementConfig {
     pub min_quality: f64,
     /// GSI flashed level (0-255) above which frames are `unreliable`.
     pub flashed_max: u8,
+    /// GSI-measured horizontal speed (u/s) above which the player counts
+    /// as moving. First-shot accuracy decays well below run speed; ~30 is
+    /// "not standing still".
+    pub moving_ups: f64,
+    /// Max distance (s) to each bracketing GSI speed sample for the
+    /// measurement to be trusted at a given instant.
+    pub gsi_bracket_s: f64,
 }
 
 impl Default for MovementConfig {
@@ -65,6 +72,8 @@ impl Default for MovementConfig {
             min_frames: 4,
             min_quality: 0.3,
             flashed_max: 100,
+            moving_ups: 30.0,
+            gsi_bracket_s: 0.4,
         }
     }
 }

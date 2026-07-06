@@ -1,14 +1,16 @@
 //! Movement/flick/shot analysis over the flow trace + GSI state trace,
 //! producing candidate findings for the LLM to validate or reject.
-//! Honesty rules: movement is ternary (never a velocity), every candidate
-//! carries the measurement uncertainty that produced it, and low-quality
-//! intervals produce nothing at all.
+//! Honesty rules: a velocity is only ever stated when it was *measured*
+//! (GSI position trace); the optical-flow classifier stays ternary. Every
+//! candidate carries the measurement uncertainty that produced it, and
+//! low-quality intervals produce nothing at all.
 
 use ir_types::ClipGsiSample;
 use serde::Serialize;
 
 use crate::config::AnalysisConfig;
 use crate::cv::flow::FlowSample;
+use crate::cv::gsi_motion::{last_stop_crossing, speed_at, SpeedSample};
 use crate::types::Severity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -19,6 +21,16 @@ pub enum MoveState {
     Unreliable,
 }
 
+/// Where a movement verdict came from: `measured` = GSI position deltas
+/// (a real velocity), `visual` = the optical-flow classifier, `mixed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveSource {
+    Measured,
+    Visual,
+    Mixed,
+}
+
 /// Contiguous run of one movement state.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +38,7 @@ pub struct MovementInterval {
     pub start_s: f64,
     pub end_s: f64,
     pub state: MoveState,
+    pub source: MoveSource,
 }
 
 /// A burst of shots inferred from GSI ammo decrements. Timing is coarse:
@@ -64,11 +77,15 @@ pub struct Candidate {
     pub note: String,
 }
 
-/// Classify each flow sample, then merge into intervals with hysteresis
-/// (gaps shorter than `min_frames` don't flip the state).
+/// Classify each flow sample — GSI-measured speed where it brackets the
+/// sample (measurement beats inference), the flow classifier elsewhere —
+/// then merge into intervals with hysteresis (visual-only blips shorter
+/// than `min_frames` don't flip the state; measured verdicts are never
+/// debounced away).
 pub fn movement_intervals(
     flow: &[FlowSample],
     gsi: &[ClipGsiSample],
+    speed: &[SpeedSample],
     cfg: &AnalysisConfig,
 ) -> Vec<MovementInterval> {
     if flow.is_empty() {
@@ -81,10 +98,20 @@ pub fn movement_intervals(
             .map(|s| s.state.flashed)
             .unwrap_or(0)
     };
-    // Per-sample raw state.
+    // Per-sample raw state + whether it was measured or inferred.
+    let mut measured = vec![false; flow.len()];
     let raw: Vec<MoveState> = flow
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
+            if let Some(ups) = speed_at(speed, s.t, m.gsi_bracket_s) {
+                measured[i] = true;
+                // A flashed player still measurably moves or doesn't.
+                if ups > m.moving_ups {
+                    return MoveState::Moving;
+                }
+                return MoveState::Stationary;
+            }
             if s.quality < m.min_quality || flashed_at(s.t) > m.flashed_max {
                 MoveState::Unreliable
             } else if s.translation_px.abs() > m.translation_px {
@@ -95,8 +122,9 @@ pub fn movement_intervals(
         })
         .collect();
 
-    // Debounce Moving: require min_frames sustained; shorter blips revert
-    // to stationary (false accusations are worse than false negatives).
+    // Debounce visual-only Moving runs: require min_frames sustained;
+    // shorter blips revert to stationary (false accusations are worse than
+    // false negatives). Measured runs are real, however short.
     let mut states = raw.clone();
     let mut i = 0;
     while i < states.len() {
@@ -105,7 +133,7 @@ pub fn movement_intervals(
             while j < states.len() && states[j] == MoveState::Moving {
                 j += 1;
             }
-            if j - i < m.min_frames {
+            if j - i < m.min_frames && !measured[i..j].iter().any(|&b| b) {
                 for s in &mut states[i..j] {
                     *s = MoveState::Stationary;
                 }
@@ -116,15 +144,26 @@ pub fn movement_intervals(
         }
     }
 
-    // Merge into intervals.
+    // Merge into intervals, tracking provenance.
     let mut intervals: Vec<MovementInterval> = Vec::new();
-    for (s, state) in flow.iter().zip(states) {
+    for ((s, state), &meas) in flow.iter().zip(states).zip(&measured) {
+        let source = if meas {
+            MoveSource::Measured
+        } else {
+            MoveSource::Visual
+        };
         match intervals.last_mut() {
-            Some(last) if last.state == state => last.end_s = s.t,
+            Some(last) if last.state == state => {
+                last.end_s = s.t;
+                if last.source != source {
+                    last.source = MoveSource::Mixed;
+                }
+            }
             _ => intervals.push(MovementInterval {
                 start_s: s.t - s.dt,
                 end_s: s.t,
                 state,
+                source,
             }),
         }
     }
@@ -238,14 +277,18 @@ pub fn flicks(flow: &[FlowSample], cfg: &AnalysisConfig) -> Vec<Flick> {
 }
 
 /// Candidate findings around the event from movement × shots × flicks.
+/// GSI-measured speed, where present, upgrades notes from "classifier
+/// says" to actual units/second and earns higher base confidence.
 pub fn candidates(
     event_at_s: f64,
     intervals: &[MovementInterval],
     shots: &[ShotEvent],
     flicks: &[Flick],
+    speed: &[SpeedSample],
     cfg: &AnalysisConfig,
 ) -> Vec<Candidate> {
     let cs = &cfg.counter_strafe;
+    let m = &cfg.movement;
     let mut out = Vec::new();
 
     // Shots in the 3 s leading to the event (the fight, not old noise).
@@ -260,38 +303,59 @@ pub fn candidates(
         }
         // GSI shot timing is coarse — confidence discounts for it.
         let timing_penalty = (1.0 - shot.uncertainty_s.min(0.5)) as f32;
+        let shot_ups = speed_at(speed, shot.t, m.gsi_bracket_s);
         match state_at(intervals, shot.t) {
             Some(MoveState::Moving) => {
+                let (base, note) = match shot_ups {
+                    Some(ups) => (
+                        0.85,
+                        format!(
+                            "{} shot(s) fired while moving at ~{ups:.0} u/s (GSI-measured)",
+                            shot.count
+                        ),
+                    ),
+                    None => (
+                        0.75,
+                        format!(
+                            "{} shot(s) fired while the movement classifier reads 'moving'",
+                            shot.count
+                        ),
+                    ),
+                };
                 out.push(Candidate {
                     kind: "moving_while_shooting".into(),
                     severity: Severity::Major,
-                    confidence: (0.75 * timing_penalty).max(0.3),
+                    confidence: (base * timing_penalty).max(0.3),
                     start_s: shot.t - shot.uncertainty_s,
                     end_s: shot.t,
                     metrics: serde_json::json!({
                         "shots": shot.count,
                         "weapon": shot.weapon,
                         "shotTimeUncertaintyS": shot.uncertainty_s,
+                        "speedUps": shot_ups.map(|u| u.round()),
                     }),
-                    note: format!(
-                        "{} shot(s) fired while the movement classifier reads 'moving'",
-                        shot.count
-                    ),
+                    note,
                 });
             }
             Some(MoveState::Stationary) => {
-                if let Some(stop_t) = last_stop_before(intervals, shot.t) {
+                // Measured stop crossing (interpolated) beats the interval
+                // boundary; fall back to the classifier's transition.
+                let measured_stop = last_stop_crossing(speed, shot.t, m.moving_ups);
+                let stop_t = measured_stop.or_else(|| last_stop_before(intervals, shot.t));
+                if let Some(stop_t) = stop_t {
                     let gap_ms = (shot.t - stop_t) * 1000.0;
+                    let boost = if measured_stop.is_some() { 1.15 } else { 1.0 };
                     if gap_ms < cs.settle_ms {
                         out.push(Candidate {
                             kind: "fired_before_settled".into(),
                             severity: Severity::Minor,
-                            confidence: (0.6 * timing_penalty).max(0.25),
+                            confidence: (0.6 * boost * timing_penalty).clamp(0.25, 0.9),
                             start_s: stop_t,
                             end_s: shot.t,
                             metrics: serde_json::json!({
                                 "stopToShotMs": gap_ms,
                                 "shotTimeUncertaintyS": shot.uncertainty_s,
+                                "stopMeasured": measured_stop.is_some(),
                             }),
                             note: format!("first shot ~{gap_ms:.0} ms after stopping"),
                         });
@@ -299,10 +363,13 @@ pub fn candidates(
                         out.push(Candidate {
                             kind: "good_counter_strafe".into(),
                             severity: Severity::Positive,
-                            confidence: (0.65 * timing_penalty).max(0.25),
+                            confidence: (0.65 * boost * timing_penalty).clamp(0.25, 0.9),
                             start_s: stop_t,
                             end_s: shot.t,
-                            metrics: serde_json::json!({ "stopToShotMs": gap_ms }),
+                            metrics: serde_json::json!({
+                                "stopToShotMs": gap_ms,
+                                "stopMeasured": measured_stop.is_some(),
+                            }),
                             note: format!("stopped ~{gap_ms:.0} ms before firing"),
                         });
                     }

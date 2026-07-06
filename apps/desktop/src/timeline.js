@@ -220,6 +220,27 @@ export class Timeline {
         else ctx.lineTo(fx, fy);
       }
       ctx.stroke();
+
+      // Measured speed (u/s) as a faint area rising from above the
+      // keyframe ticks — grayscale like the movement strip (measurement,
+      // not judgment). Mirrors the drawer's fight-strip speed area.
+      const withUps = flow.filter((s) => s.ups != null);
+      if (withUps.length > 1) {
+        const smax = Math.max(260, ...withUps.map((s) => s.ups));
+        const base = h - 9 * dpr;
+        ctx.beginPath();
+        ctx.moveTo(x(withUps[0].t * 1e6), base);
+        for (const s of withUps) {
+          ctx.lineTo(x(s.t * 1e6), base - (s.ups / smax) * h * 0.35);
+        }
+        ctx.lineTo(x(withUps[withUps.length - 1].t * 1e6), base);
+        ctx.closePath();
+        ctx.fillStyle = "#c9c9d222";
+        ctx.fill();
+        ctx.strokeStyle = "#c9c9d266";
+        ctx.lineWidth = dpr;
+        ctx.stroke();
+      }
     }
 
     // Trigger line (kept dim: it's context, not the thing you drag).

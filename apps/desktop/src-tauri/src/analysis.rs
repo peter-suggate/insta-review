@@ -424,7 +424,7 @@ async fn run_pipeline(
 
     // ---- quick mode: deterministic CV report, no LLM ----------------------
     if !llm {
-        let mut degradations = Vec::new();
+        let mut degradations = cv::cv_degradations(&cv_report);
         if !frames.is_empty() && cv_report.flow.is_empty() {
             degradations.push("CV produced no flow trace (frames too sparse?)".into());
         }
@@ -483,12 +483,20 @@ async fn run_pipeline(
         "markerAccuracy": "marker times come from CS2 game-state integration and are approximate (within ~0.3s)",
         "hotkeyPressedAtS": meta.trigger_at,
         "cv": {
-            "note": "machine measurements from optical flow on the clip and the GSI ammo/state trace; \
-                     movement is a classifier (stationary/moving/unreliable), never a speed; \
-                     shot times from ammo decrements carry the stated uncertainty",
+            "note": if cv_report.speed.is_empty() {
+                "machine measurements from optical flow on the clip and the GSI ammo/state trace; \
+                 movement is a classifier (stationary/moving/unreliable), never a speed; \
+                 shot times from ammo decrements carry the stated uncertainty"
+            } else {
+                "machine measurements; movement intervals marked source=measured come from the \
+                 GSI position trace (real u/s velocity), source=visual from an optical-flow \
+                 classifier; shot times from ammo decrements carry the stated uncertainty"
+            },
             "movementIntervals": cv_report.movement,
             "shots": cv_report.shots,
             "flicks": cv_report.flicks,
+            "speedDataAvailable": !cv_report.speed.is_empty(),
+            "flowVsGsiYawRatio": cv_report.flow_yaw_ratio,
         },
         "cvCandidates": cv_report.candidates,
     });
@@ -604,6 +612,7 @@ async fn run_pipeline(
         }
     };
     let (findings, mut degradations) = ir_analysis::parse::to_findings(&output);
+    degradations.extend(cv::cv_degradations(&cv_report));
     if !frames.is_empty() && cv_report.flow.is_empty() {
         degradations.push("CV produced no flow trace (frames too sparse?)".into());
     }
