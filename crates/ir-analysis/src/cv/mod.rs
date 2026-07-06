@@ -6,6 +6,7 @@
 pub mod flow;
 pub mod gsi_motion;
 pub mod motion;
+pub mod ocr;
 
 use ir_types::ClipGsiSample;
 use serde::Serialize;
@@ -54,10 +55,12 @@ pub struct LumaFrame {
     pub data: Vec<u8>,
 }
 
-/// Sorted collection of luma frames delivered for one analysis.
+/// Sorted collection of luma frames delivered for one analysis, plus any
+/// named native-resolution ROI crops (showpos overlay, ammo counter, ...).
 #[derive(Default)]
 pub struct FrameStore {
     frames: Vec<LumaFrame>,
+    rois: std::collections::HashMap<String, Vec<LumaFrame>>,
 }
 
 impl FrameStore {
@@ -68,8 +71,18 @@ impl FrameStore {
         self.frames.insert(pos, frame);
     }
 
+    pub fn push_roi(&mut self, name: &str, frame: LumaFrame) {
+        let list = self.rois.entry(name.to_string()).or_default();
+        let pos = list.partition_point(|f| f.t_us <= frame.t_us);
+        list.insert(pos, frame);
+    }
+
     pub fn frames(&self) -> &[LumaFrame] {
         &self.frames
+    }
+
+    pub fn roi(&self, name: &str) -> &[LumaFrame] {
+        self.rois.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn len(&self) -> usize {
@@ -97,6 +110,16 @@ pub struct CvReport {
     pub speed: Vec<gsi_motion::SpeedSample>,
     /// View angles from the GSI forward vector.
     pub view: Vec<gsi_motion::ViewSample>,
+    /// Per-frame showpos OCR readout (empty until glyphs are captured and
+    /// the overlay is on).
+    pub showpos: Vec<ocr::ShowposSample>,
+    /// Where the speed trace came from: "showpos" (60 Hz OCR), "gsi"
+    /// (10 Hz position deltas), or "none".
+    pub speed_source: String,
+    /// Where flick extraction ran: "showpos" (measured angles) or "flow".
+    pub flick_source: String,
+    /// How many showpos ROI frames were delivered (for self-checks).
+    pub showpos_roi_frames: usize,
     /// Integrated optical-flow yaw ÷ GSI view-direction yaw over the same
     /// spans (~1.0 = calibrated); None = not enough rotation to judge.
     pub flow_yaw_ratio: Option<f64>,
@@ -106,10 +129,12 @@ pub struct CvReport {
 
 /// Run the full CV pass. `clip_dims` = full-res (width, height);
 /// `gsi_offset_s` shifts GSI receipt times onto the video timeline.
+#[allow(clippy::too_many_arguments)]
 pub fn analyze(
     event: &EventRef,
     frames: &FrameStore,
     gsi: &[ClipGsiSample],
+    glyphs: Option<&ocr::GlyphSet>,
     clip_dims: (u32, u32),
     stretched43: bool,
     gsi_offset_s: f64,
@@ -117,14 +142,67 @@ pub fn analyze(
 ) -> CvReport {
     let calib = Calib::new(clip_dims.0, clip_dims.1, stretched43);
     let flow = flow::flow_trace(frames.frames(), &calib, clip_dims, &cfg.flow);
-    let speed = gsi_motion::speed_trace(gsi, gsi_offset_s);
+
+    // Showpos OCR (per-frame measured velocity + view angles) when the
+    // overlay, ROI frames, and a glyph capture are all present.
+    let showpos_rois = frames.roi("showpos");
+    let showpos = match glyphs {
+        Some(set) if cfg.showpos.enabled => ocr::showpos_trace(showpos_rois, set, &cfg.showpos),
+        _ => vec![],
+    };
+
+    // Speed source: showpos (60 Hz, exact) when coverage is good enough,
+    // else GSI position deltas (10 Hz), else nothing.
+    let sp_speed: Vec<gsi_motion::SpeedSample> = showpos
+        .iter()
+        .filter_map(|s| s.vel.map(|ups| gsi_motion::SpeedSample { t: s.t, ups }))
+        .collect();
+    let gsi_speed = gsi_motion::speed_trace(gsi, gsi_offset_s);
+    let showpos_speed_ok = !frames.is_empty()
+        && sp_speed.len() as f64 >= cfg.showpos.min_coverage * frames.len() as f64;
+    let (speed, speed_source, bracket_s) = if showpos_speed_ok {
+        (sp_speed, "showpos".to_string(), 0.12)
+    } else if !gsi_speed.is_empty() {
+        (gsi_speed, "gsi".to_string(), cfg.movement.gsi_bracket_s)
+    } else {
+        (vec![], "none".to_string(), cfg.movement.gsi_bracket_s)
+    };
+
     let view = gsi_motion::view_trace(gsi, gsi_offset_s);
-    let movement = motion::movement_intervals(&flow, gsi, &speed, cfg);
+    let movement = motion::movement_intervals(&flow, gsi, &speed, bracket_s, cfg);
     let shots = motion::shots_from_gsi(gsi, gsi_offset_s);
-    let flicks = motion::flicks(&flow, cfg);
-    let candidates = motion::candidates(event.at_s, &movement, &shots, &flicks, &speed, cfg);
+
+    // Flicks from measured showpos angles when they cover the window;
+    // optical flow otherwise. Same extractor either way.
+    let sp_angles: Vec<flow::FlowSample> = showpos
+        .windows(2)
+        .filter_map(|w| {
+            let (a, b) = (&w[0], &w[1]);
+            let dt = b.t - a.t;
+            let (ya, yb) = (a.yaw_deg?, b.yaw_deg?);
+            let (pa, pb) = (a.pitch_deg?, b.pitch_deg?);
+            (dt > 0.0 && dt <= 0.1).then(|| flow::FlowSample {
+                t: b.t,
+                dt,
+                yaw_dps: gsi_motion::wrap_deg(yb - ya) / dt,
+                pitch_dps: (pb - pa) / dt,
+                translation_px: 0.0,
+                quality: 1.0,
+            })
+        })
+        .collect();
+    let showpos_angles_ok = !frames.is_empty()
+        && sp_angles.len() as f64 >= cfg.showpos.min_coverage * frames.len() as f64;
+    let (flicks, flick_source) = if showpos_angles_ok {
+        (motion::flicks(&sp_angles, cfg), "showpos".to_string())
+    } else {
+        (motion::flicks(&flow, cfg), "flow".to_string())
+    };
+
+    let candidates =
+        motion::candidates(event.at_s, &movement, &shots, &flicks, &speed, bracket_s, cfg);
     let flow_yaw_ratio = gsi_motion::flow_vs_gsi_yaw_ratio(&flow, &view);
-    let versions = [
+    let mut versions: std::collections::BTreeMap<String, String> = [
         ("flow".to_string(), "1".to_string()),
         ("movement".to_string(), "2".to_string()),
         ("shots-gsi".to_string(), "1".to_string()),
@@ -132,6 +210,9 @@ pub fn analyze(
         ("gsi-motion".to_string(), "1".to_string()),
     ]
     .into();
+    if !showpos.is_empty() {
+        versions.insert("showpos-ocr".to_string(), "1".to_string());
+    }
     CvReport {
         calib,
         flow,
@@ -141,6 +222,10 @@ pub fn analyze(
         candidates,
         speed,
         view,
+        showpos,
+        speed_source,
+        flick_source,
+        showpos_roi_frames: showpos_rois.len(),
         flow_yaw_ratio,
         versions,
     }
@@ -150,6 +235,18 @@ pub fn analyze(
 /// whatever the report pipeline adds).
 pub fn cv_degradations(cv: &CvReport) -> Vec<String> {
     let mut out = Vec::new();
+    // Only meaningful when OCR actually ran (glyphs captured): reading
+    // almost nothing then means the overlay is off or the capture is stale.
+    // Without glyphs the engine is dormant by design — not a degradation.
+    if !cv.showpos.is_empty()
+        && cv.showpos.iter().filter(|s| s.vel.is_some()).count() * 4 < cv.showpos_roi_frames
+    {
+        out.push(
+            "showpos OCR read little/nothing from the overlay region \
+             (cl_showpos off, or glyphs stale for this machine/HUD scale)"
+                .into(),
+        );
+    }
     if let Some(ratio) = cv.flow_yaw_ratio {
         if !(0.5..=2.0).contains(&ratio) {
             out.push(format!(
@@ -379,7 +476,7 @@ mod tests {
             .map(|i| frame(i * 16_667, 0, i as i64 * 3))
             .collect();
         let flow = flow::flow_trace(&frames, &Calib::new(FULL.0, FULL.1, true), FULL, &cfg().flow);
-        let intervals = motion::movement_intervals(&flow, &[], &[], &cfg());
+        let intervals = motion::movement_intervals(&flow, &[], &[], 0.4, &cfg());
         assert!(
             intervals
                 .iter()
@@ -408,7 +505,7 @@ mod tests {
         // the fused verdict must be Moving, from measurement.
         let frames_static: Vec<LumaFrame> = (0..40).map(|i| frame(i * 16_667, 0, 0)).collect();
         let running = gsi((0..9).map(|i| [i as f64 * 25.0, 0.0, 0.0]).collect());
-        let r = analyze(&event(0.4), &store(frames_static), &running, FULL, true, 0.0, &cfg());
+        let r = analyze(&event(0.4), &store(frames_static), &running, None, FULL, true, 0.0, &cfg());
         assert!(
             r.movement
                 .iter()
@@ -422,7 +519,7 @@ mod tests {
         let frames_parallax: Vec<LumaFrame> =
             (0..40).map(|i| frame(i * 16_667, 0, i as i64 * 3)).collect();
         let standing = gsi(vec![[100.0, 200.0, 0.0]; 9]);
-        let r = analyze(&event(0.4), &store(frames_parallax), &standing, FULL, true, 0.0, &cfg());
+        let r = analyze(&event(0.4), &store(frames_parallax), &standing, None, FULL, true, 0.0, &cfg());
         assert!(
             !r.movement
                 .iter()
@@ -436,7 +533,7 @@ mod tests {
     fn static_scene_is_stationary() {
         let frames: Vec<LumaFrame> = (0..30).map(|i| frame(i * 16_667, 0, 0)).collect();
         let flow = flow::flow_trace(&frames, &Calib::new(FULL.0, FULL.1, true), FULL, &cfg().flow);
-        let intervals = motion::movement_intervals(&flow, &[], &[], &cfg());
+        let intervals = motion::movement_intervals(&flow, &[], &[], 0.4, &cfg());
         assert!(
             intervals.iter().all(|iv| iv.state == MoveState::Stationary),
             "{intervals:?}"
@@ -502,7 +599,7 @@ mod tests {
                 },
             },
         ];
-        let report = analyze(&event(0.8), &store(frames), &gsi, FULL, true, 0.0, &cfg());
+        let report = analyze(&event(0.8), &store(frames), &gsi, None, FULL, true, 0.0, &cfg());
         assert!(
             report
                 .candidates
@@ -542,7 +639,7 @@ mod tests {
                 },
             },
         ];
-        let cv = analyze(&event(0.8), &store(frames), &gsi, FULL, true, 0.0, &cfg());
+        let cv = analyze(&event(0.8), &store(frames), &gsi, None, FULL, true, 0.0, &cfg());
         let report = local_report(&event(0.8), &cv, 7, vec![0.5, 0.8], vec![]);
         assert_eq!(report.provider.provider, "local-cv");
         assert!(report

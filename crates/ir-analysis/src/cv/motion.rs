@@ -86,6 +86,7 @@ pub fn movement_intervals(
     flow: &[FlowSample],
     gsi: &[ClipGsiSample],
     speed: &[SpeedSample],
+    bracket_s: f64,
     cfg: &AnalysisConfig,
 ) -> Vec<MovementInterval> {
     if flow.is_empty() {
@@ -104,7 +105,7 @@ pub fn movement_intervals(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            if let Some(ups) = speed_at(speed, s.t, m.gsi_bracket_s) {
+            if let Some(ups) = speed_at(speed, s.t, bracket_s) {
                 measured[i] = true;
                 // A flashed player still measurably moves or doesn't.
                 if ups > m.moving_ups {
@@ -285,6 +286,7 @@ pub fn candidates(
     shots: &[ShotEvent],
     flicks: &[Flick],
     speed: &[SpeedSample],
+    bracket_s: f64,
     cfg: &AnalysisConfig,
 ) -> Vec<Candidate> {
     let cs = &cfg.counter_strafe;
@@ -303,7 +305,7 @@ pub fn candidates(
         }
         // GSI shot timing is coarse — confidence discounts for it.
         let timing_penalty = (1.0 - shot.uncertainty_s.min(0.5)) as f32;
-        let shot_ups = speed_at(speed, shot.t, m.gsi_bracket_s);
+        let shot_ups = speed_at(speed, shot.t, bracket_s);
         match state_at(intervals, shot.t) {
             Some(MoveState::Moving) => {
                 let (base, note) = match shot_ups {

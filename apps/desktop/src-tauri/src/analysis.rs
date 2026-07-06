@@ -51,6 +51,49 @@ pub struct BeginResponse {
     /// Present on a cache miss — frames the webview must extract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<ExtractionPlan>,
+    /// Named native-resolution crops to extract alongside each raw frame
+    /// (showpos overlay, later the ammo counter). Pixel rects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rois: Vec<RoiRect>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoiRect {
+    pub name: String,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Pixel ROIs for this clip from the analysis config (fractions × dims).
+fn plan_rois(app: &AppHandle, meta: &ClipMeta) -> Vec<RoiRect> {
+    let cfg = ir_analysis::config::load_or_init(
+        &app.path()
+            .app_config_dir()
+            .unwrap_or_else(|_| PathBuf::from(".")),
+    );
+    let mut rois = Vec::new();
+    // No glyph capture yet -> OCR would be dormant; skip the crop traffic.
+    let has_glyphs = app
+        .path()
+        .app_config_dir()
+        .map(|d| d.join("showpos-glyphs.json").is_file())
+        .unwrap_or(false);
+    if cfg.showpos.enabled && has_glyphs {
+        let (rx, ry, rw, rh) = cfg.showpos.roi;
+        let w = ((meta.width as f64 * rw).round() as u32).clamp(8, meta.width);
+        let h = ((meta.height as f64 * rh).round() as u32).clamp(8, meta.height);
+        rois.push(RoiRect {
+            name: "showpos".into(),
+            x: ((meta.width as f64 * rx) as u32).min(meta.width - w),
+            y: ((meta.height as f64 * ry) as u32).min(meta.height - h),
+            w,
+            h,
+        });
+    }
+    rois
 }
 
 fn emit_progress(app: &AppHandle, stage: &str, detail: String, current: u64, total: u64) {
@@ -109,6 +152,7 @@ pub fn analysis_begin(
             return Ok(BeginResponse {
                 cached: Some(report),
                 plan: None,
+                rois: vec![],
             });
         }
     }
@@ -142,6 +186,7 @@ pub fn analysis_begin(
     .map_err(|e| e.to_string())?;
 
     let response_plan = plan.clone();
+    let rois = plan_rois(&app, &meta);
     *state.analysis.lock().unwrap() = Some(ActiveAnalysis {
         event,
         clip_mp4,
@@ -157,6 +202,7 @@ pub fn analysis_begin(
     Ok(BeginResponse {
         cached: None,
         plan: Some(response_plan),
+        rois,
     })
 }
 
@@ -192,6 +238,25 @@ pub fn analysis_frame(
     }
 
     let (delivered, total) = match kind.as_str() {
+        "roi" => {
+            let w: u32 = header("w").and_then(|s| s.parse().ok()).ok_or("missing w")?;
+            let h: u32 = header("h").and_then(|s| s.parse().ok()).ok_or("missing h")?;
+            let name = header("name").ok_or("missing roi name")?;
+            if (w * h) as usize != bytes.len() {
+                return Err(format!("roi size mismatch: {w}x{h} vs {}", bytes.len()));
+            }
+            active.frame_store.push_roi(
+                &name,
+                LumaFrame {
+                    t_us,
+                    w,
+                    h,
+                    data: bytes.clone(),
+                },
+            );
+            // ROIs ride along with luma frames; luma drives the progress bar.
+            return Ok(());
+        }
         "luma" => {
             let w: u32 = header("w").and_then(|s| s.parse().ok()).ok_or("missing w")?;
             let h: u32 = header("h").and_then(|s| s.parse().ok()).ok_or("missing h")?;
@@ -401,10 +466,12 @@ async fn run_pipeline(
         0,
         0,
     );
+    let glyphs = cv::ocr::GlyphSet::load(&prompts_dir.with_file_name("showpos-glyphs.json"));
     let cv_report = cv::analyze(
         event,
         &frames,
         &meta.gsi_trace,
+        glyphs.as_ref(),
         (meta.width, meta.height),
         settings.stretch_43,
         settings.gsi_offset_seconds as f64,
@@ -496,6 +563,8 @@ async fn run_pipeline(
             "shots": cv_report.shots,
             "flicks": cv_report.flicks,
             "speedDataAvailable": !cv_report.speed.is_empty(),
+            "speedSource": cv_report.speed_source,
+            "flickSource": cv_report.flick_source,
             "flowVsGsiYawRatio": cv_report.flow_yaw_ratio,
         },
         "cvCandidates": cv_report.candidates,

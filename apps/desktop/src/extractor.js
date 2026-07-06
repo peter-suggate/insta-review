@@ -3,10 +3,12 @@
 // playhead are untouched — and delivers frames to Rust via raw-payload
 // invokes (bytes as body, metadata in headers).
 //
-// Two products per plan entry:
+// Products per plan entry:
 //   wantJpeg — full-res JPEG evidence file for the LLM,
 //   wantRaw  — downscaled grayscale for the CV pass (dense, hundreds of
-//              frames), sent as `kind: luma` with w/h headers.
+//              frames), sent as `kind: luma` with w/h headers, plus one
+//              native-resolution grayscale crop per requested ROI
+//              (showpos overlay, ammo counter), sent as `kind: roi`.
 //
 // VideoFrames are consumed synchronously inside the decoder callback and
 // closed immediately — a dense plan must never hold hundreds of GPU frames.
@@ -20,7 +22,7 @@ const LUMA_H = 270;
 // sub-millisecond rounding some decoders introduce (same trick as player.js).
 const msKey = (us) => Math.round(us / 1000);
 
-export async function extractFrames({ samples, buffer, decoderConfig, wants }) {
+export async function extractFrames({ samples, buffer, decoderConfig, wants, rois = [] }) {
   if (!wants.length) return 0;
 
   // Nearest sample per requested timestamp, keyed by the sample's own tUs
@@ -46,6 +48,11 @@ export async function extractFrames({ samples, buffer, decoderConfig, wants }) {
 
   const lumaCanvas = new OffscreenCanvas(LUMA_W, LUMA_H);
   const lumaCtx = lumaCanvas.getContext("2d", { willReadFrequently: true });
+  // One reusable canvas per ROI (native-res crops are small).
+  const roiCanvases = rois.map((r) => {
+    const canvas = new OffscreenCanvas(r.w, r.h);
+    return { r, ctx: canvas.getContext("2d", { willReadFrequently: true }) };
+  });
   const jpegJobs = []; // [planTUs, OffscreenCanvas] — encoded after decode
   let sendChain = Promise.resolve();
   let sent = 0;
@@ -84,6 +91,23 @@ export async function extractFrames({ samples, buffer, decoderConfig, wants }) {
               w: String(LUMA_W),
               h: String(LUMA_H),
             });
+            // Native-res ROI crops ride along with every raw frame.
+            for (const { r, ctx } of roiCanvases) {
+              ctx.drawImage(frame, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+              const px = ctx.getImageData(0, 0, r.w, r.h).data;
+              const crop = new Uint8Array(r.w * r.h);
+              for (let i = 0; i < crop.length; i++) {
+                const o = i * 4;
+                crop[i] = (77 * px[o] + 150 * px[o + 1] + 29 * px[o + 2]) >> 8;
+              }
+              send(crop, {
+                kind: "roi",
+                name: r.name,
+                "t-us": String(tUs),
+                w: String(r.w),
+                h: String(r.h),
+              });
+            }
           }
           if (want.wantJpeg) {
             const full = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);

@@ -98,7 +98,7 @@ pub fn last_stop_crossing(trace: &[SpeedSample], before_t: f64, threshold: f64) 
         })
 }
 
-fn wrap_deg(d: f64) -> f64 {
+pub(crate) fn wrap_deg(d: f64) -> f64 {
     let mut d = d % 360.0;
     if d > 180.0 {
         d -= 360.0;

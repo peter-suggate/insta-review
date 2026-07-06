@@ -13,6 +13,35 @@ pub struct AnalysisConfig {
     pub movement: MovementConfig,
     pub flick: FlickConfig,
     pub counter_strafe: CounterStrafeConfig,
+    pub showpos: ShowposConfig,
+}
+
+/// `cl_showpos 1` OCR: per-frame velocity + view angles read from the
+/// overlay's fixed top-left text. Needs a per-machine glyph capture
+/// (`showpos-glyphs.json` next to this config) — the engine stays dormant
+/// until that exists, and costs nothing when the overlay is off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ShowposConfig {
+    pub enabled: bool,
+    /// ROI as frame fractions (x, y, w, h) — cl_showpos renders top-left.
+    pub roi: (f64, f64, f64, f64),
+    /// Minimum glyph-match agreement (0-1) to accept a character.
+    pub min_score: f64,
+    /// Fraction of frames that must yield a velocity before showpos
+    /// replaces GSI as the speed source.
+    pub min_coverage: f64,
+}
+
+impl Default for ShowposConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            roi: (0.0, 0.0, 0.32, 0.12),
+            min_score: 0.72,
+            min_coverage: 0.5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

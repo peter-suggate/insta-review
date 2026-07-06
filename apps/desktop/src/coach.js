@@ -106,7 +106,11 @@ export class Coach {
         return;
       }
       this.progress({ stage: "extracting", detail: "extracting frames…" });
-      const sent = await extractFrames({ ...this.clip, wants: res.plan.frames });
+      const sent = await extractFrames({
+        ...this.clip,
+        wants: res.plan.frames,
+        rois: res.rois || [],
+      });
       if (!sent) throw new Error("no frames could be extracted");
       await invoke("analysis_run", { llm });
       // Completion arrives via analysis-complete / analysis-error events.
