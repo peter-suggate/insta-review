@@ -14,7 +14,7 @@
         "title": "insta-review",
         "width": 1440,
         "height": 900,
-        "visible": false,
+        "visible": true,
         "resizable": true,
         "backgroundColor": "#101014"
       }

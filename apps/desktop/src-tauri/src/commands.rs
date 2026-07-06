@@ -5,8 +5,9 @@ use crate::state::{AppSettings, AppState};
 
 #[tauri::command]
 pub fn close_review(app: AppHandle, state: State<AppState>) {
+    // Minimize rather than hide: the taskbar button stays available.
     if let Some(window) = app.get_webview_window("review") {
-        let _ = window.hide();
+        let _ = window.minimize();
     }
     #[cfg(windows)]
     {

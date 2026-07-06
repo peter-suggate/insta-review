@@ -68,6 +68,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             info!("second launch detected; surfacing the review window");
             if let Some(window) = app.get_webview_window("review") {
+                let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -121,6 +122,51 @@ fn main() {
                 warn!("{e}");
             }
 
+            // Tray icon: closing the review window only minimizes it, so
+            // the tray is the persistent handle for reopening and quitting.
+            {
+                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+                use tauri::tray::{
+                    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+                };
+
+                let show_review = |app: &AppHandle| {
+                    if let Some(window) = app.get_webview_window("review") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                };
+                let open = MenuItem::with_id(app, "open", "Open review window", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit insta-review", true, None::<&str>)?;
+                let menu =
+                    Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+                TrayIconBuilder::with_id("main")
+                    .icon(app.default_window_icon().expect("app icon").clone())
+                    .tooltip(format!(
+                        "insta-review — capturing ({} to review)",
+                        settings.hotkey
+                    ))
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |app, event| match event.id.as_ref() {
+                        "open" => show_review(app),
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(move |tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            show_review(tray.app_handle());
+                        }
+                    })
+                    .build(app)?;
+            }
+
             // Dev hook: IR_AUTOTRIGGER=8 fires the snapshot path N seconds
             // after launch (no keyboard needed under automation).
             if let Ok(secs) = std::env::var("IR_AUTOTRIGGER") {
@@ -136,10 +182,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the review window hides it; the app keeps capturing.
+            // Closing the review window minimizes it to the taskbar; the
+            // app keeps capturing.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = window.minimize();
             }
         })
         .run(tauri::generate_context!())

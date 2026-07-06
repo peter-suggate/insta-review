@@ -151,6 +151,7 @@ pub fn trigger_snapshot(app: &AppHandle) {
             warn!("emit clip-ready: {e}");
         }
         if let Some(window) = app.get_webview_window("review") {
+            let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
         }
