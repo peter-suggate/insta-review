@@ -20,13 +20,15 @@ const SEVERITY_COLOR = {
 const SEVERITY_ORDER = { major: 0, minor: 1, info: 2, positive: 3 };
 
 export class Coach {
-  constructor({ onToast, onSeek, onTrace, onState } = {}) {
+  constructor({ onToast, onSeek, onTrace, onState, onVisibility } = {}) {
     this.onToast = onToast || (() => {});
     this.onSeek = onSeek || (() => {});
     this.onTrace = onTrace || (() => {});
     // Coarse lifecycle signal for ambient UI (status pill, marker badges):
     // { state: "idle" | "running" | "done" | "error", ... }.
     this.onState = onState || (() => {});
+    // Fired after the drawer is shown/hidden — the stage relayouts around it.
+    this.onVisibility = onVisibility || (() => {});
     this.clip = null; // { samples, buffer, decoderConfig, gsiOffset }
     this.busy = false;
     this.currentEventId = null;
@@ -120,6 +122,7 @@ export class Coach {
     $("coach-error").classList.add("hidden");
     $("coach-body").textContent = "";
     $("coach").classList.remove("hidden");
+    this.onVisibility(true);
   }
 
   close() {
@@ -128,6 +131,7 @@ export class Coach {
       this.busy = false;
     }
     $("coach").classList.add("hidden");
+    this.onVisibility(false);
   }
 
   visible() {
@@ -142,6 +146,7 @@ export class Coach {
       !$("coach-error").classList.contains("hidden")
     ) {
       $("coach").classList.remove("hidden");
+      this.onVisibility(true);
     }
   }
 

@@ -78,7 +78,7 @@ const player = new Player($("video"), {
     if (player.stretch) flags.push("4:3→16:9");
     $("hud-flags").textContent = flags.join(" · ");
     syncControls();
-    layoutCoach(); // stretch toggle changes the displayed aspect
+    layoutStage(); // stretch toggle changes the displayed aspect
   },
 });
 
@@ -129,7 +129,7 @@ function clearAll() {
   });
   capturedAtMs = null;
   updateCapturedHud();
-  layoutCoach(); // back to the default width; the wide clip is gone
+  layoutStage(); // back to the default width; the wide clip is gone
   $("hud").classList.add("hidden");
   $("waiting").classList.remove("hidden");
   for (const b of document.querySelectorAll("#controls button")) b.disabled = true;
@@ -156,26 +156,27 @@ function toast(msg, ms = 2500) {
   el._t = setTimeout(() => el.classList.add("hidden"), ms);
 }
 
-// Widen the coach drawer into the letterbox margin when the clip is
-// narrower than the stage (square capture region, 4:3 unstretched): that
-// space is otherwise dead, and the charts/frames benefit from it. The
-// video stays centered, so the guaranteed-empty right margin is half the
-// spare width; the drawer never eats into the picture.
-function layoutCoach() {
+// Stage layout, in order: (1) an open coach drawer claims its width —
+// all the spare width beyond what the clip needs (square capture region,
+// 4:3 unstretched), min 340px, capped at 45% of the stage; (2) the video
+// canvas gets the remaining width and the player re-centers the picture
+// within it. The drawer never covers the picture; if the 340px minimum
+// exceeds the spare width, the video shrinks to fit what's left.
+function layoutStage() {
   const m = clipMeta?.meta;
   const stage = $("stage").getBoundingClientRect();
-  let width = 340;
+  let drawerW = 340;
   if (m && m.width > 0 && m.height > 0 && stage.height > 0) {
     const is43 = Math.abs(m.width / m.height - 4 / 3) < 0.05;
     const aspect = player.stretch && is43 ? 16 / 9 : m.width / m.height;
-    const rightMargin = (stage.width - stage.height * aspect) / 2;
-    width = Math.round(
-      Math.min(Math.max(340, rightMargin), stage.width * 0.45)
-    );
+    const spare = stage.width - stage.height * aspect;
+    drawerW = Math.round(Math.min(Math.max(340, spare), stage.width * 0.45));
   }
-  $("coach").style.width = `${width}px`;
+  $("coach").style.width = `${drawerW}px`;
+  $("video").style.right = coach.visible() ? `${drawerW}px` : "0";
+  player.redraw(); // canvas size changed; re-letterbox the current frame
 }
-window.addEventListener("resize", layoutCoach);
+window.addEventListener("resize", layoutStage);
 
 const coach = new Coach({
   onToast: toast,
@@ -188,6 +189,7 @@ const coach = new Coach({
     setAiStatus(s);
     if (s.state === "done" && s.atS != null) timeline.markAnalyzed(s.atS * 1e6);
   },
+  onVisibility: () => layoutStage(), // video yields to / reclaims the drawer
 });
 
 // Ambient coach state in the status bar; clicking it re-opens the drawer.
@@ -282,7 +284,7 @@ async function loadClip(payload) {
     triggerUs: payload.meta.trigger_at * 1e6,
     gsiOffsetUs,
   });
-  layoutCoach();
+  layoutStage();
 
   // Open paused just before the moment of interest: 1 s before the most
   // recent death (the hotkey is pressed after dying), else 1 s before the
