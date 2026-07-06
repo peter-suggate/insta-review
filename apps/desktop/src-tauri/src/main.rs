@@ -42,6 +42,13 @@ fn replay_protocol(
                 _ => respond(404, b"no such clip".to_vec(), "text/plain"),
             }
         }
+        // Evidence thumbnails for the coach panel.
+        ["analysis", event_id, "frames", file] => {
+            match analysis::serve_analysis_frame(app, event_id, file) {
+                Some(bytes) => respond(200, bytes, "image/jpeg"),
+                None => respond(404, b"no such frame".to_vec(), "text/plain"),
+            }
+        }
         _ => respond(404, b"not found".to_vec(), "text/plain"),
     }
 }
@@ -105,6 +112,8 @@ fn main() {
             analysis::analysis_frame,
             analysis::analysis_run,
             analysis::analysis_cancel,
+            analysis::get_analysis,
+            analysis::analysis_feedback,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

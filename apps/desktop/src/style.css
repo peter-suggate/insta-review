@@ -158,4 +158,38 @@ button.danger { color: #ff7a7a; }
   border: 1px solid rgba(255, 90, 90, 0.25);
   border-radius: 5px; padding: 8px;
 }
-#coach-body { white-space: pre-wrap; line-height: 1.5; }
+#coach-body { line-height: 1.5; display: flex; flex-direction: column; gap: 10px; }
+
+.coach-degraded {
+  color: #ffb050; font-size: 11.5px;
+  background: rgba(255, 176, 80, 0.08);
+  border: 1px solid rgba(255, 176, 80, 0.25);
+  border-radius: 5px; padding: 6px 8px;
+}
+.coach-summary { white-space: pre-wrap; }
+.coach-finding {
+  background: #1c1c23; border: 1px solid #26262e; border-radius: 6px;
+  padding: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.coach-finding-head { display: flex; align-items: center; gap: 7px; }
+.coach-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.coach-kind { font-weight: 600; text-transform: capitalize; }
+.coach-conf { color: var(--dim); font-size: 11px; }
+.coach-chip {
+  padding: 1px 7px; font-size: 11px; border-radius: 10px;
+  font-variant-numeric: tabular-nums; margin-left: auto;
+}
+.coach-evidence { display: flex; flex-wrap: wrap; gap: 4px; }
+.coach-evidence .coach-chip { margin-left: 0; }
+.coach-coaching { white-space: pre-wrap; }
+.coach-thumbs { display: flex; gap: 4px; justify-content: flex-end; }
+.coach-thumb { padding: 1px 7px; font-size: 12px; opacity: 0.6; }
+.coach-thumb.active { opacity: 1; border-color: var(--accent); }
+.coach-low summary { color: var(--dim); cursor: pointer; font-size: 11.5px; }
+.coach-low { display: flex; flex-direction: column; gap: 8px; }
+.coach-frames { display: flex; flex-wrap: wrap; gap: 5px; }
+.coach-frames img {
+  width: 74px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #26262e;
+}
+.coach-frames img:hover { border-color: var(--accent); }

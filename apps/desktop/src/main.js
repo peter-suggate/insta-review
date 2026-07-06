@@ -55,6 +55,10 @@ const timeline = new Timeline($("timeline"), {
     player.pause();
     player.seekToUs(us).catch(console.error);
   },
+  onMarkerClick: (marker) => {
+    player.pause();
+    coach.openForEvent(marker).catch((e) => toast(`analyze failed: ${e}`, 5000));
+  },
 });
 
 const player = new Player($("video"), {
@@ -148,7 +152,13 @@ function toast(msg, ms = 2500) {
   el._t = setTimeout(() => el.classList.add("hidden"), ms);
 }
 
-const coach = new Coach({ onToast: toast });
+const coach = new Coach({
+  onToast: toast,
+  onSeek: (tS) => {
+    player.pause();
+    player.seekToUs(tS * 1e6).catch(console.error);
+  },
+});
 
 // Kill/death marker nearest the playhead (display times, i.e. GSI-shifted).
 function eventMarkerNearPlayhead() {

@@ -32,6 +32,10 @@ impl LlmProvider for Claude {
             String::new(),
             "--no-session-persistence".into(),
         ];
+        if let Some(schema) = &req.json_schema {
+            argv.push("--json-schema".into());
+            argv.push(schema.clone());
+        }
         if !req.system_prompt.is_empty() {
             argv.push("--append-system-prompt".into());
             argv.push(req.system_prompt.clone());
@@ -69,6 +73,14 @@ impl LlmProvider for Claude {
             .map(str::to_owned)
             .ok_or_else(|| LlmError::Parse("claude envelope has no `result` field".into()))
     }
+
+    fn output_instructions(&self, _schema: &str) -> String {
+        // --json-schema enforces the shape at the CLI layer; the model only
+        // needs to know a structured answer is expected.
+        "Your final answer must be the structured JSON output requested \
+         (it is validated automatically)."
+            .into()
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +106,7 @@ mod tests {
             system_prompt: "sys".into(),
             user_prompt: "user".into(),
             images: vec![],
+            json_schema: Some("{\"type\":\"object\"}".into()),
         };
         let cfg = LlmConfig {
             provider: "claude".into(),
@@ -105,5 +118,6 @@ mod tests {
         let argv = Claude.build_argv(&req, &cfg);
         assert_eq!(argv.last().unwrap(), "user");
         assert!(!argv.iter().any(|a| a == "--bare"));
+        assert!(argv.windows(2).any(|w| w[0] == "--json-schema"));
     }
 }

@@ -11,10 +11,11 @@ const MARKER_STYLE = {
 };
 
 export class Timeline {
-  constructor(canvas, { onSeek } = {}) {
+  constructor(canvas, { onSeek, onMarkerClick } = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
     this.onSeek = onSeek || (() => {});
+    this.onMarkerClick = onMarkerClick || null;
     this.durationUs = 0;
     this.playheadUs = 0;
     this.markers = [];
@@ -30,6 +31,12 @@ export class Timeline {
     };
     let dragging = false;
     canvas.addEventListener("pointerdown", (e) => {
+      // A click on a kill/death icon (top strip) analyzes instead of seeking.
+      const hit = this.markerAt(e);
+      if (hit && this.onMarkerClick) {
+        this.onMarkerClick(hit);
+        return;
+      }
       dragging = true;
       canvas.setPointerCapture(e.pointerId);
       seekFromEvent(e);
@@ -60,6 +67,28 @@ export class Timeline {
   setPlayhead(us) {
     this.playheadUs = us;
     this.draw();
+  }
+
+  // Kill/death marker whose icon (top 16 css px) is within ±6 px of the
+  // pointer, or null.
+  markerAt(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (py > 16 || !this.durationUs) return null;
+    let best = null;
+    let bestDist = 7; // > 6 px = no hit
+    for (const marker of this.markers) {
+      if (!["kill", "death"].includes(marker.kind.type)) continue;
+      const t = marker.at * 1e6 + this.gsiOffsetUs;
+      const mx = (t / this.durationUs) * rect.width;
+      const d = Math.abs(mx - px);
+      if (d < bestDist) {
+        bestDist = d;
+        best = marker;
+      }
+    }
+    return best;
   }
 
   nextMarkerAfter(us) {

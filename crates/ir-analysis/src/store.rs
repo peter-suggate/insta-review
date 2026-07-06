@@ -76,6 +76,50 @@ pub fn frame_file_name(t_us: u64) -> String {
     format!("f_{:06}ms.jpg", t_us / 1000)
 }
 
+/// Resolve an analysis frame image for serving to the UI: newest run of the
+/// event that has it. Inputs are sanitized — `file` must look like a frame
+/// file name, so no path can escape the analysis dir.
+pub fn find_analysis_frame(clip_mp4: &Path, event_id: &str, file: &str) -> Option<PathBuf> {
+    if !file
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        || !file.ends_with(".jpg")
+    {
+        return None;
+    }
+    let runs_dir = analysis_dir(clip_mp4).join(sanitize(event_id)).join("runs");
+    let mut runs: Vec<PathBuf> = std::fs::read_dir(&runs_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    runs.sort();
+    runs.iter()
+        .rev()
+        .map(|run| run.join("frames").join(file))
+        .find(|p| p.is_file())
+}
+
+/// Merge one thumbs verdict into the event's `feedback.json`
+/// (`{"findings": {"<index>": true/false}}`) — day-one label collection for
+/// the future eval harness.
+pub fn record_feedback(
+    clip_mp4: &Path,
+    event_id: &str,
+    finding_index: usize,
+    up: bool,
+) -> std::io::Result<()> {
+    let path = analysis_dir(clip_mp4)
+        .join(sanitize(event_id))
+        .join("feedback.json");
+    let mut value: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    value["findings"][finding_index.to_string()] = serde_json::json!(up);
+    std::fs::write(&path, serde_json::to_string_pretty(&value)?)
+}
+
 /// Event ids come from the frontend; keep them filesystem-safe.
 fn sanitize(id: &str) -> String {
     id.chars()
@@ -114,6 +158,7 @@ mod tests {
             },
             degradations: vec![],
             analyzer_versions: Default::default(),
+            frames: vec![],
         }
     }
 
@@ -138,5 +183,36 @@ mod tests {
     fn sanitize_strips_separators() {
         assert_eq!(sanitize("kill_9200ms"), "kill_9200ms");
         assert_eq!(sanitize("../evil/id"), "___evil_id");
+    }
+
+    #[test]
+    fn find_analysis_frame_picks_newest_run_and_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp4 = tmp.path().join("clip_1_001.mp4");
+        let old = prepare_run(&mp4, "kill_1ms", 1).unwrap();
+        let new = prepare_run(&mp4, "kill_1ms", 2).unwrap();
+        std::fs::write(old.frames_dir.join("f_000100ms.jpg"), b"old").unwrap();
+        std::fs::write(new.frames_dir.join("f_000100ms.jpg"), b"new").unwrap();
+
+        let found = find_analysis_frame(&mp4, "kill_1ms", "f_000100ms.jpg").unwrap();
+        assert_eq!(std::fs::read(found).unwrap(), b"new");
+        assert!(find_analysis_frame(&mp4, "kill_1ms", "../report.json").is_none());
+        assert!(find_analysis_frame(&mp4, "kill_1ms", "f.png").is_none());
+    }
+
+    #[test]
+    fn feedback_merges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mp4 = tmp.path().join("clip_1_001.mp4");
+        prepare_run(&mp4, "kill_1ms", 1).unwrap();
+        record_feedback(&mp4, "kill_1ms", 0, true).unwrap();
+        record_feedback(&mp4, "kill_1ms", 2, false).unwrap();
+        let text = std::fs::read_to_string(
+            analysis_dir(&mp4).join("kill_1ms").join("feedback.json"),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["findings"]["0"], true);
+        assert_eq!(v["findings"]["2"], false);
     }
 }

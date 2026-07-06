@@ -119,4 +119,8 @@ pub struct AnalysisReport {
     pub degradations: Vec<String>,
     #[serde(default)]
     pub analyzer_versions: BTreeMap<String, String>,
+    /// Clip-relative seconds of the frames the model saw — the UI's
+    /// evidence thumbnails. Additive field: no schema bump.
+    #[serde(default)]
+    pub frames: Vec<f64>,
 }

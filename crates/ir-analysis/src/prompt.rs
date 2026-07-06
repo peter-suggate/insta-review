@@ -65,7 +65,13 @@ mod tests {
 
     #[test]
     fn defaults_have_expected_placeholders() {
-        for key in ["event_kind", "event_at", "frame_manifest", "context_json"] {
+        for key in [
+            "event_kind",
+            "event_at",
+            "frame_manifest",
+            "context_json",
+            "output_instructions",
+        ] {
             assert!(
                 DEFAULT_USER.contains(&format!("{{{{{key}}}}}")),
                 "coach.user.md is missing {{{{{key}}}}}"

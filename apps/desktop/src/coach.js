@@ -4,16 +4,30 @@
 
 import { extractFrames } from "./extractor.js";
 
-const { invoke } = window.__TAURI__.core;
+const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 
+const SEVERITY_COLOR = {
+  major: "#ff5a5a",
+  minor: "#ffb050",
+  info: "#5090ff",
+  positive: "#50c878",
+};
+const SEVERITY_ORDER = { major: 0, minor: 1, info: 2, positive: 3 };
+
 export class Coach {
-  constructor({ onToast } = {}) {
+  constructor({ onToast, onSeek } = {}) {
     this.onToast = onToast || (() => {});
+    this.onSeek = onSeek || (() => {});
     this.clip = null; // { samples, buffer, decoderConfig, gsiOffset }
     this.busy = false;
+    this.currentEventId = null;
+    this.minConfidence = 0.5;
+    invoke("get_settings")
+      .then((s) => (this.minConfidence = s.analysisMinConfidence ?? 0.5))
+      .catch(() => {});
 
     $("coach-close").addEventListener("click", () => this.close());
     $("coach-cancel").addEventListener("click", () => {
@@ -63,6 +77,7 @@ export class Coach {
       atS,
       kind: marker.kind,
     };
+    this.currentEventId = event.id;
 
     this.open(`${marker.kind.type} @ ${atS.toFixed(1)}s`);
     this.busy = true;
@@ -126,13 +141,130 @@ export class Coach {
     $("coach-provider").textContent =
       `${p.provider}${p.model ? ` (${p.model})` : ""} · ${(p.durationMs / 1000).toFixed(0)}s` +
       (cached ? " · cached" : "");
-    $("coach-body").textContent = report.summary;
+
+    const body = $("coach-body");
+    body.textContent = "";
+
+    if (report.degradations?.length) {
+      const warn = el("div", "coach-degraded");
+      warn.textContent = `⚠ ${report.degradations.join("; ")}`;
+      body.appendChild(warn);
+    }
+
+    const summary = el("div", "coach-summary");
+    summary.textContent = report.summary;
+    body.appendChild(summary);
+
+    const findings = [...(report.findings || [])].sort(
+      (a, b) =>
+        (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9) ||
+        b.confidence - a.confidence
+    );
+    const shown = findings.filter((f) => f.confidence >= this.minConfidence);
+    const low = findings.filter((f) => f.confidence < this.minConfidence);
+
+    for (const f of shown) body.appendChild(this.findingEl(f, report));
+    if (low.length) {
+      const fold = document.createElement("details");
+      fold.className = "coach-low";
+      const label = document.createElement("summary");
+      label.textContent = `${low.length} low-confidence finding${low.length > 1 ? "s" : ""}`;
+      fold.appendChild(label);
+      for (const f of low) fold.appendChild(this.findingEl(f, report));
+      body.appendChild(fold);
+    }
+
+    if (report.frames?.length) {
+      const strip = el("div", "coach-frames");
+      for (const t of report.frames) {
+        const img = document.createElement("img");
+        img.src = convertFileSrc(
+          `analysis/${report.event.id}/frames/${frameFile(t)}`,
+          "replay"
+        );
+        img.title = `${t.toFixed(2)}s — click to seek`;
+        img.addEventListener("click", () => this.onSeek(t));
+        strip.appendChild(img);
+      }
+      body.appendChild(strip);
+    }
+
     invoke("player_status", {
       status:
         `COACH ${report.event.id}: ${p.provider} ${p.cliVersion} in ` +
         `${(p.durationMs / 1000).toFixed(1)}s${cached ? " (cached)" : ""} — ` +
-        `${report.summary.length} chars: ${report.summary.slice(0, 160)}…`,
+        `${report.findings?.length ?? 0} findings, summary: ${report.summary.slice(0, 120)}…`,
     }).catch(() => {});
+  }
+
+  findingEl(f, report) {
+    const item = el("div", "coach-finding");
+
+    const head = el("div", "coach-finding-head");
+    const dot = el("span", "coach-dot");
+    dot.style.background = SEVERITY_COLOR[f.severity] || "#888";
+    dot.title = f.severity;
+    head.appendChild(dot);
+
+    const title = el("span", "coach-kind");
+    title.textContent = f.kind.replaceAll("_", " ");
+    head.appendChild(title);
+
+    const conf = el("span", "coach-conf");
+    conf.textContent = `${Math.round(f.confidence * 100)}%`;
+    head.appendChild(conf);
+
+    const [startS, endS] = f.timeRange || [null, null];
+    if (startS != null) {
+      const chip = el("button", "coach-chip");
+      chip.textContent =
+        endS > startS ? `${startS.toFixed(1)}–${endS.toFixed(1)}s` : `${startS.toFixed(1)}s`;
+      chip.addEventListener("click", () => this.onSeek(startS));
+      head.appendChild(chip);
+    }
+    item.appendChild(head);
+
+    const text = el("div", "coach-coaching");
+    text.textContent = f.coaching;
+    item.appendChild(text);
+
+    if (f.evidence?.length) {
+      const row = el("div", "coach-evidence");
+      for (const e of f.evidence) {
+        const chip = el("button", "coach-chip");
+        chip.textContent = `${e.t.toFixed(2)}s`;
+        if (e.note) chip.title = e.note;
+        chip.addEventListener("click", () => this.onSeek(e.t));
+        row.appendChild(chip);
+      }
+      item.appendChild(row);
+    }
+
+    const thumbs = el("div", "coach-thumbs");
+    const index = report.findings.indexOf(f);
+    for (const [glyph, up] of [
+      ["👍", true],
+      ["👎", false],
+    ]) {
+      const btn = el("button", "coach-thumb");
+      btn.textContent = glyph;
+      btn.addEventListener("click", () => {
+        invoke("analysis_feedback", {
+          eventId: report.event.id,
+          findingIndex: index,
+          up,
+        })
+          .then(() => {
+            thumbs.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+            btn.classList.add("active");
+          })
+          .catch((err) => this.onToast(`feedback failed: ${err}`));
+      });
+      thumbs.appendChild(btn);
+    }
+    item.appendChild(thumbs);
+
+    return item;
   }
 
   error({ kind, stage, message }) {
@@ -144,6 +276,16 @@ export class Coach {
       status: `COACH ERROR (${stage}/${kind}): ${message}`,
     }).catch(() => {});
   }
+}
+
+function el(tag, className) {
+  const node = document.createElement(tag);
+  node.className = className;
+  return node;
+}
+
+function frameFile(tS) {
+  return `f_${String(Math.round(tS * 1000)).padStart(6, "0")}ms.jpg`;
 }
 
 function b64ToBytes(b64) {

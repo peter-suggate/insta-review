@@ -252,6 +252,45 @@ pub fn analysis_cancel(state: State<AppState>) {
     }
 }
 
+/// Cached report for an event of the staged clip, if it was saved and
+/// analyzed before. Read-only: no auto-save, nothing spawned.
+#[tauri::command]
+pub fn get_analysis(state: State<AppState>, event_id: String) -> Option<AnalysisReport> {
+    let clip = state.clip.lock().unwrap();
+    let saved = clip.as_ref()?.saved_path.as_ref()?.clone();
+    store::cached_report(&saved, &event_id)
+}
+
+/// Thumbs up/down on one finding — persisted next to the report, feeding
+/// the future eval harness.
+#[tauri::command]
+pub fn analysis_feedback(
+    state: State<AppState>,
+    event_id: String,
+    finding_index: usize,
+    up: bool,
+) -> Result<(), String> {
+    let saved = {
+        let clip = state.clip.lock().unwrap();
+        clip.as_ref()
+            .and_then(|c| c.saved_path.clone())
+            .ok_or("clip not saved")?
+    };
+    store::record_feedback(&saved, &event_id, finding_index, up).map_err(|e| e.to_string())
+}
+
+/// Serve an analysis frame JPEG for the replay:// route. Path safety lives
+/// in `store::find_analysis_frame` (frame-file-name allowlist).
+pub fn serve_analysis_frame(app: &AppHandle, event_id: &str, file: &str) -> Option<Vec<u8>> {
+    let state = app.state::<AppState>();
+    let saved = {
+        let clip = state.clip.lock().unwrap();
+        clip.as_ref()?.saved_path.clone()?
+    };
+    let path = store::find_analysis_frame(&saved, event_id, file)?;
+    std::fs::read(path).ok()
+}
+
 fn prompts_dir(app: &AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
@@ -345,6 +384,9 @@ async fn run_pipeline(
         })
         .collect();
 
+    let provider = llm::provider_for(&settings.llm_provider).map_err(fail("compose"))?;
+    let schema = ir_analysis::parse::coach_output_schema();
+
     let templates = prompt::load(prompts_dir);
     let mut vars = std::collections::BTreeMap::new();
     vars.insert("event_kind", event_kind_label(&event.kind));
@@ -354,6 +396,7 @@ async fn run_pipeline(
         serde_json::to_string_pretty(&context).unwrap_or_default(),
     );
     vars.insert("frame_manifest", manifest);
+    vars.insert("output_instructions", provider.output_instructions(&schema));
     let system_prompt = prompt::render(&templates.system, &vars);
     let user_prompt = prompt::render(&templates.user, &vars);
 
@@ -361,8 +404,6 @@ async fn run_pipeline(
     let _ = store::write_text(&dirs.run_dir, "prompt.user.md", &user_prompt);
 
     // ---- invoke ----------------------------------------------------------
-    let provider =
-        llm::provider_for(&settings.llm_provider).map_err(fail("compose"))?;
     let cfg = LlmConfig {
         provider: settings.llm_provider.clone(),
         model: settings.llm_model.clone(),
@@ -370,7 +411,7 @@ async fn run_pipeline(
         extra_args: settings.llm_extra_args.clone(),
         timeout_secs: settings.llm_timeout_seconds.max(30) as u64,
     };
-    let req = LlmRequest {
+    let mut req = LlmRequest {
         run_dir: dirs.run_dir.clone(),
         system_prompt,
         user_prompt,
@@ -378,37 +419,73 @@ async fn run_pipeline(
             .iter()
             .map(|&t| format!("frames/{}", store::frame_file_name(t)))
             .collect(),
+        json_schema: Some(schema),
     };
 
-    let heartbeat_app = app.clone();
-    let provider_name = settings.llm_provider.clone();
-    emit_progress(app, "invoking", format!("asking {provider_name}…"), 0, 0);
-    let outcome = llm::run_llm(provider.as_ref(), &req, &cfg, cancel, move |elapsed| {
+    let invoke = |req: LlmRequest, attempt: u32| {
+        let heartbeat_app = app.clone();
+        let provider_name = settings.llm_provider.clone();
+        let retry_tag = if attempt > 1 { " (retry)" } else { "" };
         emit_progress(
-            &heartbeat_app,
+            app,
             "invoking",
-            format!("asking {provider_name}… {elapsed}s"),
-            elapsed,
+            format!("asking {provider_name}{retry_tag}…"),
+            0,
             0,
         );
-    })
-    .await;
+        let provider = &provider;
+        let cfg = &cfg;
+        async move {
+            let outcome =
+                llm::run_llm(provider.as_ref(), &req, cfg, cancel, move |elapsed| {
+                    emit_progress(
+                        &heartbeat_app,
+                        "invoking",
+                        format!("asking {provider_name}{retry_tag}… {elapsed}s"),
+                        elapsed,
+                        0,
+                    );
+                })
+                .await;
+            // Persist raw CLI output win or lose — it's the debugging record.
+            let suffix = if attempt > 1 { "2" } else { "" };
+            if let Ok(o) = &outcome {
+                let _ = store::write_text(&dirs.run_dir, &format!("llm_stdout{suffix}.txt"), &o.stdout);
+                let _ = store::write_text(&dirs.run_dir, &format!("llm_stderr{suffix}.txt"), &o.stderr);
+                let _ = store::write_json(&dirs.run_dir, &format!("llm_meta{suffix}.json"), o);
+            }
+            outcome
+        }
+    };
 
-    // Persist raw CLI output win or lose — it's the debugging record.
-    if let Ok(o) = &outcome {
-        let _ = store::write_text(&dirs.run_dir, "llm_stdout.txt", &o.stdout);
-        let _ = store::write_text(&dirs.run_dir, "llm_stderr.txt", &o.stderr);
-        let _ = store::write_json(&dirs.run_dir, "llm_meta.json", o);
-    }
-    let outcome = outcome.map_err(fail("invoking"))?;
+    let outcome = invoke(req.clone(), 1).await.map_err(fail("invoking"))?;
+
+    // ---- parse (with one repair retry on shape mismatch) -----------------
+    emit_progress(app, "parsing", "parsing findings".into(), 0, 0);
+    let (output, outcome) = match ir_analysis::parse::parse_coach_output(&outcome.text) {
+        Ok(output) => (output, outcome),
+        Err(parse_err) => {
+            warn!("coach output parse failed, retrying once: {parse_err}");
+            req.user_prompt = format!(
+                "{}\n\nYour previous reply could not be used: {parse_err}\n\
+                 Respond with ONLY the required JSON object.",
+                req.user_prompt
+            );
+            let retry = invoke(req, 2).await.map_err(fail("invoking"))?;
+            match ir_analysis::parse::parse_coach_output(&retry.text) {
+                Ok(output) => (output, retry),
+                Err(e) => return Err(("parsing", LlmError::Parse(e))),
+            }
+        }
+    };
+    let (findings, degradations) = ir_analysis::parse::to_findings(&output);
 
     // ---- report ----------------------------------------------------------
-    emit_progress(app, "parsing", "saving report".into(), 0, 0);
     let report = AnalysisReport {
         schema_version: SCHEMA_VERSION,
         event: event.clone(),
-        summary: outcome.text.clone(),
-        findings: vec![],
+        summary: output.summary.clone(),
+        findings,
         metrics: serde_json::Value::Null,
         provider: ProviderInfo {
             provider: settings.llm_provider.clone(),
@@ -416,11 +493,17 @@ async fn run_pipeline(
             cli_version: outcome.cli_version.clone(),
             duration_ms: outcome.duration_ms,
         },
-        degradations: vec![],
+        degradations,
         analyzer_versions: Default::default(),
+        frames: received.iter().map(|&t| t as f64 / 1e6).collect(),
     };
     store::persist_report(dirs, &report)
         .map_err(|e| ("persisting", LlmError::Other(e.to_string())))?;
-    info!(event = %event.id, clip = %clip_mp4.display(), "analysis complete");
+    info!(
+        event = %event.id,
+        findings = report.findings.len(),
+        clip = %clip_mp4.display(),
+        "analysis complete"
+    );
     Ok(report)
 }

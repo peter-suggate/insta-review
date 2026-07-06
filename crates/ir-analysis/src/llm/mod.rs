@@ -6,6 +6,7 @@
 //! that).
 
 pub mod claude;
+pub mod codex;
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -37,6 +38,10 @@ pub struct LlmRequest {
     pub system_prompt: String,
     pub user_prompt: String,
     pub images: Vec<String>,
+    /// JSON Schema the reply must satisfy. Enforced natively where the CLI
+    /// supports it (claude `--json-schema`); otherwise carried by
+    /// [`LlmProvider::output_instructions`] in the prompt.
+    pub json_schema: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,11 +73,16 @@ pub trait LlmProvider: Send + Sync {
     }
     /// Extract the assistant's final text.
     fn parse(&self, stdout: &str, result_file: Option<&str>) -> Result<String, LlmError>;
+    /// What to tell the model about the required output format, given the
+    /// request's JSON schema. Providers with native schema enforcement need
+    /// only a short note; the rest must carry the schema in the prompt.
+    fn output_instructions(&self, schema: &str) -> String;
 }
 
 pub fn provider_for(name: &str) -> Result<Box<dyn LlmProvider>, LlmError> {
     match name {
         "claude" => Ok(Box::new(claude::Claude)),
+        "codex" => Ok(Box::new(codex::Codex)),
         other => Err(LlmError::Other(format!(
             "unknown LLM provider {other:?} (expected \"claude\" or \"codex\")"
         ))),

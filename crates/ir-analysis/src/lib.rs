@@ -8,6 +8,7 @@
 //! Tauri, so `ir-cli` can drive the same pipeline headless later.
 
 pub mod llm;
+pub mod parse;
 pub mod prompt;
 pub mod store;
 pub mod types;
