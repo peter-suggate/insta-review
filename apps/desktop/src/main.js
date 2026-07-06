@@ -199,13 +199,20 @@ async function loadClip(payload) {
     gsiOffsetUs,
   });
 
-  // Open paused at the very start: the clip IS the last moments, so
-  // play-through runs the whole recording up to the hotkey press. The
-  // stream keeps decoding ahead in the background from here.
-  await player.ensureFrame(0);
-  player.present(0);
-  player.playheadUs = 0;
-  openPointUs = 0;
+  // Open paused just before the moment of interest: 1 s before the most
+  // recent death (the hotkey is pressed after dying), else 1 s before the
+  // latest kill, else the start of the clip. R/replay returns here too.
+  const latestMarkerUs = (type) =>
+    payload.meta.markers
+      .filter((m) => m.kind?.type === type)
+      .map((m) => m.at * 1e6 + gsiOffsetUs)
+      .filter((t) => t >= 0 && t <= player.durationUs())
+      .sort((a, b) => a - b)
+      .pop();
+  const focusUs = latestMarkerUs("death") ?? latestMarkerUs("kill");
+  const openUs = focusUs != null ? Math.max(0, focusUs - 1e6) : 0;
+  await player.seekToUs(openUs);
+  openPointUs = openUs;
   for (const b of document.querySelectorAll("#controls button"))
     b.disabled = false;
   player.onStateChange();
